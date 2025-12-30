@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { MonitoringController } from './monitoring.controller';
 import { MonitoringService } from './monitoring.service';
+import { SensorStatusController } from './sensor-status.controller';
 import { Device } from '../entities/device.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Sensor } from '../entities/sensor.entity';
@@ -36,7 +37,7 @@ import {
       MlEventActiveView,
     ]),
   ],
-  controllers: [MonitoringController],
+  controllers: [MonitoringController, SensorStatusController],
   providers: [MonitoringService],
   exports: [MonitoringService],
 })

@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Device } from '../entities/device.entity';
 import { Sensor } from '../entities/sensor.entity';
 import { SensorReading } from '../entities/sensor-reading.entity';
@@ -53,6 +53,225 @@ export class MonitoringService {
     private readonly dataSource: DataSource,
     private readonly notificationsService: NotificationsService,
   ) {}
+
+  private isDeadlock1205(err: any): boolean {
+    const n =
+      err?.number ??
+      err?.codeNumber ??
+      err?.driverError?.number ??
+      err?.originalError?.number ??
+      err?.cause?.number;
+    return Number(n) === 1205;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async withReadUncommitted<T>(fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+
+    // Importante: en SQL Server, READ UNCOMMITTED equivale a NOLOCK / lecturas no bloqueantes.
+    await qr.startTransaction('READ UNCOMMITTED');
+    try {
+      const out = await fn(qr.manager);
+      await qr.commitTransaction();
+      return out;
+    } catch (e) {
+      try {
+        await qr.rollbackTransaction();
+      } catch {
+        // ignore
+      }
+      throw e;
+    } finally {
+      try {
+        await qr.release();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private async withReadUncommittedRetry<T>(
+    fn: (manager: EntityManager) => Promise<T>,
+    opts?: { retries?: number; baseDelayMs?: number },
+  ): Promise<T> {
+    const retries = Math.max(0, Math.floor(opts?.retries ?? 2));
+    const baseDelayMs = Math.max(0, Math.floor(opts?.baseDelayMs ?? 30));
+
+    let attempt = 0;
+    // 1 + retries total tries.
+    while (true) {
+      try {
+        return await this.withReadUncommitted(fn);
+      } catch (e) {
+        if (!this.isDeadlock1205(e) || attempt >= retries) throw e;
+        await this.sleep(baseDelayMs * Math.pow(2, attempt));
+        attempt++;
+      }
+    }
+  }
+
+  private safeJsonParse(value: unknown): any | null {
+    if (value === null || value === undefined) return null;
+    if (typeof value !== 'string' || value.trim() === '') return null;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  private computeFinalState(args: {
+    alertActive: any | null;
+    warningActive: any | null;
+    predictionCurrent: any | null;
+  }): 'alert' | 'warning' | 'prediction' | 'unknown' {
+    if (args.alertActive) return 'alert';
+    if (args.warningActive) return 'warning';
+    if (args.predictionCurrent) return 'prediction';
+    return 'unknown';
+  }
+
+  async getSensorConsolidatedStatus(sensorId: number) {
+    return this.withReadUncommittedRetry(async (manager) => {
+      const sensor = await manager.getRepository(Sensor).findOne({
+        where: { id: String(sensorId) },
+      });
+      if (!sensor) {
+        throw new NotFoundException('Sensor no existe');
+      }
+
+      const [alertRow] = await manager.query(
+        `
+        SELECT TOP 1
+          id,
+          sensor_id      AS sensor_id,
+          device_id      AS device_id,
+          threshold_id   AS threshold_id,
+          severity,
+          status,
+          triggered_value AS triggered_value,
+          triggered_at    AS triggered_at
+        FROM dbo.alerts WITH (NOLOCK)
+        WHERE sensor_id = @0
+          AND status = 'active'
+        ORDER BY triggered_at DESC
+        `,
+        [sensorId],
+      );
+
+      const [warningRow] = await manager.query(
+        `
+        SELECT TOP 1
+          id,
+          sensor_id AS sensor_id,
+          device_id AS device_id,
+          event_type AS event_type,
+          event_code AS event_code,
+          status,
+          created_at AS created_at,
+          title,
+          message,
+          payload
+        FROM dbo.ml_events WITH (NOLOCK)
+        WHERE sensor_id = @0
+          AND event_code = 'DELTA_SPIKE'
+          AND status = 'active'
+        ORDER BY created_at DESC
+        `,
+        [sensorId],
+      );
+
+      const [predictionRow] = await manager.query(
+        `
+        SELECT TOP 1
+          id,
+          sensor_id AS sensor_id,
+          model_id AS model_id,
+          predicted_value AS predicted_value,
+          confidence,
+          predicted_at AS predicted_at,
+          target_timestamp AS target_timestamp
+        FROM dbo.predictions WITH (NOLOCK)
+        WHERE sensor_id = @0
+        ORDER BY predicted_at DESC
+        `,
+        [sensorId],
+      );
+
+      // Requisito explícito: consultar sensor_readings_latest aunque el DTO no lo exponga.
+      // Lo usamos para validar que hay “estado” de lectura disponible, sin forzar a Flutter
+      // a deducir reglas.
+      await manager.query(
+        `
+        SELECT TOP 1 sensor_id, latest_value, latest_timestamp
+        FROM dbo.sensor_readings_latest WITH (NOLOCK)
+        WHERE sensor_id = @0
+        `,
+        [sensorId],
+      );
+
+      const alert_active =
+        alertRow
+          ? {
+              id: Number(alertRow.id),
+              sensor_id: Number(alertRow.sensor_id),
+              device_id: Number(alertRow.device_id),
+              threshold_id: Number(alertRow.threshold_id),
+              severity: String(alertRow.severity),
+              status: String(alertRow.status),
+              triggered_value: Number(alertRow.triggered_value),
+              triggered_at: alertRow.triggered_at,
+            }
+          : null;
+
+      const warning_active =
+        warningRow
+          ? {
+              id: Number(warningRow.id),
+              sensor_id: Number(warningRow.sensor_id),
+              device_id: Number(warningRow.device_id),
+              event_type: String(warningRow.event_type),
+              event_code: String(warningRow.event_code),
+              status: String(warningRow.status),
+              created_at: warningRow.created_at,
+              title: warningRow.title ?? null,
+              message: warningRow.message ?? null,
+              payload: this.safeJsonParse(warningRow.payload),
+            }
+          : null;
+
+      const prediction_current =
+        predictionRow
+          ? {
+              id: Number(predictionRow.id),
+              sensor_id: Number(predictionRow.sensor_id),
+              model_id: Number(predictionRow.model_id),
+              predicted_value: Number(predictionRow.predicted_value),
+              confidence: Number(predictionRow.confidence),
+              predicted_at: predictionRow.predicted_at,
+              target_timestamp: predictionRow.target_timestamp,
+            }
+          : null;
+
+      const final_state = this.computeFinalState({
+        alertActive: alert_active,
+        warningActive: warning_active,
+        predictionCurrent: prediction_current,
+      });
+
+      return {
+        sensor_id: Number(sensorId),
+        final_state,
+        alert_active,
+        warning_active,
+        prediction_current,
+      };
+    });
+  }
 
   private parseOptionalNumber(value: unknown): number | null {
     if (value === null || value === undefined) return null;
@@ -160,11 +379,13 @@ export class MonitoringService {
    * Lista dispositivos con sus sensores (vista v_devices_with_sensors)
    */
   async getDevicesWithSensors() {
-    const rows = await this.deviceWithSensorsViewRepo.find();
-    return rows.map((row) => ({
-      ...row,
-      lastConnection: this.formatDateTime(row.lastConnection ?? null),
-    }));
+    return this.withReadUncommittedRetry(async (manager) => {
+      const rows = await manager.getRepository(DeviceWithSensorsView).find();
+      return rows.map((row) => ({
+        ...row,
+        lastConnection: this.formatDateTime(row.lastConnection ?? null),
+      }));
+    });
   }
 
   /**
@@ -174,25 +395,27 @@ export class MonitoringService {
    * polling en tiempo real bloquee la ingesta (READ UNCOMMITTED).
    */
   async getLatestSensorReadings() {
-    const rows = await this.dataSource.query(
-      `
-      SELECT
-        lr.sensor_id      AS sensorId,
-        lr.sensor_uuid    AS sensorUuid,
-        lr.sensor_name    AS sensorName,
-        lr.sensor_type    AS sensorType,
-        lr.unit           AS unit,
-        lr.device_name    AS deviceName,
-        lr.latest_value   AS latestValue,
-        lr.latest_timestamp AS latestTimestamp
-      FROM v_latest_sensor_readings lr WITH (NOLOCK)
-      `,
-    );
+    return this.withReadUncommittedRetry(async (manager) => {
+      const rows = await manager.query(
+        `
+        SELECT
+          lr.sensor_id      AS sensorId,
+          lr.sensor_uuid    AS sensorUuid,
+          lr.sensor_name    AS sensorName,
+          lr.sensor_type    AS sensorType,
+          lr.unit           AS unit,
+          lr.device_name    AS deviceName,
+          lr.latest_value   AS latestValue,
+          lr.latest_timestamp AS latestTimestamp
+        FROM v_latest_sensor_readings lr WITH (NOLOCK)
+        `,
+      );
 
-    return (rows ?? []).map((row: any) => ({
-      ...row,
-      latestTimestamp: this.formatDateTime(row.latestTimestamp ?? null),
-    }));
+      return (rows ?? []).map((row: any) => ({
+        ...row,
+        latestTimestamp: this.formatDateTime(row.latestTimestamp ?? null),
+      }));
+    });
   }
 
   /**
@@ -202,12 +425,16 @@ export class MonitoringService {
    * y permitir navegación directa al detalle del sensor desde el frontend.
    */
   async getActiveAlerts(limit = 100) {
-    const rows = await this.alertsHistoryViewRepo
-      .createQueryBuilder('a')
-      .where('a.status IN (:...st)', { st: ['active', 'acknowledged'] })
-      .orderBy('a.triggeredAt', 'DESC')
-      .limit(limit)
-      .getMany();
+    const rows = await this.withReadUncommittedRetry(async (manager) =>
+      manager
+        .getRepository(AlertsHistoryView)
+        .createQueryBuilder('a')
+        .setLock('dirty_read')
+        .where('a.status IN (:...st)', { st: ['active', 'acknowledged'] })
+        .orderBy('a.triggeredAt', 'DESC')
+        .limit(limit)
+        .getMany(),
+    );
 
     return rows.map((row) => ({
       alertId: row.alertId,
@@ -232,12 +459,16 @@ export class MonitoringService {
    * Historial de alertas (por sensor).
    */
   async getSensorAlertsHistory(sensorId: number, limit = 50) {
-    const rows = await this.alertsHistoryViewRepo
-      .createQueryBuilder('a')
-      .where('a.sensorId = :sensorId', { sensorId: String(sensorId) })
-      .orderBy('a.triggeredAt', 'DESC')
-      .limit(limit)
-      .getMany();
+    const rows = await this.withReadUncommittedRetry(async (manager) =>
+      manager
+        .getRepository(AlertsHistoryView)
+        .createQueryBuilder('a')
+        .setLock('dirty_read')
+        .where('a.sensorId = :sensorId', { sensorId: String(sensorId) })
+        .orderBy('a.triggeredAt', 'DESC')
+        .limit(limit)
+        .getMany(),
+    );
 
     return rows.map((row) => ({
       alertId: row.alertId,
@@ -261,11 +492,15 @@ export class MonitoringService {
    * Devuelve eventos ML activos/acknowledged (vista v_ml_events_active)
    */
   async getActiveMlEvents(limit = 50) {
-    const rows = await this.mlEventActiveViewRepo
-      .createQueryBuilder('e')
-      .orderBy('e.createdAt', 'DESC')
-      .limit(limit)
-      .getMany();
+    const rows = await this.withReadUncommittedRetry(async (manager) =>
+      manager
+        .getRepository(MlEventActiveView)
+        .createQueryBuilder('e')
+        .setLock('dirty_read')
+        .orderBy('e.createdAt', 'DESC')
+        .limit(limit)
+        .getMany(),
+    );
 
     return rows.map((row) => ({
       ...row,
@@ -278,14 +513,18 @@ export class MonitoringService {
    * Devuelve las últimas predicciones generadas por modelos ML.
    */
   async getLatestPredictions(limit = 50) {
-    const rows = await this.predictionRepo
-      .createQueryBuilder('p')
-      .leftJoinAndSelect('p.model', 'model')
-      .leftJoinAndSelect('p.sensor', 'sensor')
-      .leftJoinAndSelect('sensor.device', 'device')
-      .orderBy('p.targetTimestamp', 'ASC')
-      .limit(limit)
-      .getMany();
+    const rows = await this.withReadUncommittedRetry(async (manager) =>
+      manager
+        .getRepository(Prediction)
+        .createQueryBuilder('p')
+        .setLock('dirty_read')
+        .leftJoinAndSelect('p.model', 'model')
+        .leftJoinAndSelect('p.sensor', 'sensor')
+        .leftJoinAndSelect('sensor.device', 'device')
+        .orderBy('p.targetTimestamp', 'ASC')
+        .limit(limit)
+        .getMany(),
+    );
 
     return rows.map((p) => ({
       id: p.id,
@@ -331,15 +570,20 @@ export class MonitoringService {
   }
 
   async getDeviceById(id: number) {
-    return this.deviceRepo.findOne({ where: { id: String(id) } });
+    return this.withReadUncommittedRetry(async (manager) =>
+      manager.getRepository(Device).findOne({ where: { id: String(id) } }),
+    );
   }
 
   async getSensorReadings(sensorId: number, limit = 100) {
-    return this.sensorReadingRepo.find({
-      where: { sensor: { id: String(sensorId) } },
-      order: { timestamp: 'DESC' },
-      take: limit,
-    });
+    return this.withReadUncommittedRetry(async (manager) =>
+      manager.getRepository(SensorReading).find({
+        where: { sensor: { id: String(sensorId) } },
+        order: { timestamp: 'DESC' },
+        take: limit,
+        relations: ['sensor', 'sensor.device'],
+      }),
+    );
   }
 
   /**
@@ -348,16 +592,18 @@ export class MonitoringService {
    * (ej: nevera = temperatura + humedad, cada uno con sus propios thresholds).
    */
   async getSensorThresholds(sensorId: number) {
-    const rows = await this.thresholdRepo.find({
-      where: {
-        sensorId: String(sensorId),
-        isActive: true,
-      },
-      order: {
-        severity: 'DESC',
-        id: 'ASC',
-      },
-    });
+    const rows = await this.withReadUncommittedRetry(async (manager) =>
+      manager.getRepository(AlertThreshold).find({
+        where: {
+          sensorId: String(sensorId),
+          isActive: true,
+        },
+        order: {
+          severity: 'DESC',
+          id: 'ASC',
+        },
+      }),
+    );
 
     return rows.map((t) => ({
       id: t.id,
@@ -551,10 +797,12 @@ export class MonitoringService {
   }
 
   async getThresholdHistory(thresholdId: number) {
-    const rows = await this.thresholdHistoryRepo.find({
-      where: { thresholdId: String(thresholdId) },
-      order: { changedAt: 'DESC' },
-    });
+    const rows = await this.withReadUncommittedRetry(async (manager) =>
+      manager.getRepository(ThresholdHistory).find({
+        where: { thresholdId: String(thresholdId) },
+        order: { changedAt: 'DESC' },
+      }),
+    );
 
     return rows.map((h) => ({
       id: h.id,

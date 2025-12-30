@@ -78,6 +78,12 @@ export class MonitoringController {
     return this.monitoringService.getSensorReadings(sensorId, parsedLimit);
   }
 
+  @Get('sensors/:sensorId/status')
+  @Roles('admin', 'operator', 'viewer')
+  getSensorConsolidatedStatus(@Param('sensorId', ParseIntPipe) sensorId: number) {
+    return this.monitoringService.getSensorConsolidatedStatus(sensorId);
+  }
+
   /**
    * GET /monitoring/sensors/:sensorId/alerts?limit=50
    * Historial de alertas del sensor.

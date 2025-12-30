@@ -5,7 +5,7 @@ import {
   NotFoundException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Alert } from '../entities/alert.entity';
 import { DeviceLocation } from '../entities/device-location.entity';
 import { Sensor } from '../entities/sensor.entity';
@@ -94,6 +94,65 @@ export class CrmService {
     private readonly dataSource: DataSource,
   ) {}
 
+  private isDeadlock1205(err: any): boolean {
+    const n =
+      err?.number ??
+      err?.codeNumber ??
+      err?.driverError?.number ??
+      err?.originalError?.number ??
+      err?.cause?.number;
+    return Number(n) === 1205;
+  }
+
+  private async sleep(ms: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private async withReadUncommitted<T>(fn: (manager: EntityManager) => Promise<T>): Promise<T> {
+    const qr = this.dataSource.createQueryRunner();
+    await qr.connect();
+
+    // READ UNCOMMITTED en SQL Server equivale a NOLOCK (lectura no bloqueante).
+    await qr.startTransaction('READ UNCOMMITTED');
+    try {
+      const out = await fn(qr.manager);
+      await qr.commitTransaction();
+      return out;
+    } catch (e) {
+      try {
+        await qr.rollbackTransaction();
+      } catch {
+        // ignore
+      }
+      throw e;
+    } finally {
+      try {
+        await qr.release();
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  private async withReadUncommittedRetry<T>(
+    fn: (manager: EntityManager) => Promise<T>,
+    opts?: { retries?: number; baseDelayMs?: number },
+  ): Promise<T> {
+    const retries = Math.max(0, Math.floor(opts?.retries ?? 2));
+    const baseDelayMs = Math.max(0, Math.floor(opts?.baseDelayMs ?? 30));
+
+    let attempt = 0;
+    while (true) {
+      try {
+        return await this.withReadUncommitted(fn);
+      } catch (e) {
+        if (!this.isDeadlock1205(e) || attempt >= retries) throw e;
+        await this.sleep(baseDelayMs * Math.pow(2, attempt));
+        attempt++;
+      }
+    }
+  }
+
   private clampPageSize(n: number, max = 200): number {
     if (!Number.isFinite(n) || n <= 0) return 50;
     return Math.min(Math.floor(n), max);
@@ -110,13 +169,15 @@ export class CrmService {
   private async assertDeviceReadAccess(deviceId: number, ctx: AuthCtx) {
     // Nuevo criterio: todos los roles pueden ver todos los dispositivos.
     // Solo validamos existencia.
-    const rows = await this.dataSource.query(
-      `
-      SELECT TOP 1 d.id AS id
-      FROM devices d
-      WHERE d.id = @0
-      `,
-      [deviceId],
+    const rows = await this.withReadUncommittedRetry((manager) =>
+      manager.query(
+        `
+        SELECT TOP 1 d.id AS id
+        FROM devices d WITH (NOLOCK)
+        WHERE d.id = @0
+        `,
+        [deviceId],
+      ),
     );
 
     if (!rows || rows.length === 0) {
@@ -162,13 +223,15 @@ export class CrmService {
 
     const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
 
-    const countRows = await this.dataSource.query(
-      `
-      SELECT COUNT(1) AS total
-      FROM devices d
-      ${whereSql}
-      `,
-      params,
+    const countRows = await this.withReadUncommittedRetry((manager) =>
+      manager.query(
+        `
+        SELECT COUNT(1) AS total
+        FROM devices d WITH (NOLOCK)
+        ${whereSql}
+        `,
+        params,
+      ),
     );
 
     const total = Number(countRows?.[0]?.total ?? 0);
@@ -177,37 +240,39 @@ export class CrmService {
     const offsetIx = params.length;
     const nextIx = params.length + 1;
 
-    const rows = await this.dataSource.query(
-      `
-      SELECT
-        d.id AS deviceId,
-        d.device_uuid AS deviceUuid,
-        d.name AS deviceName,
-        d.device_type AS deviceType,
-        d.status,
-        d.last_connection AS lastConnection,
-        (
-          SELECT COUNT(1)
-          FROM sensors s
-          WHERE s.device_id = d.id
-        ) AS sensorCount,
-        (
-          SELECT COUNT(1)
-          FROM alerts a
-          WHERE a.device_id = d.id
-            AND a.status IN ('active', 'acknowledged')
-        ) AS activeAlerts,
-        (
-          SELECT MAX(a.triggered_at)
-          FROM alerts a
-          WHERE a.device_id = d.id
-        ) AS lastAlertAt
-      FROM devices d
-      ${whereSql}
-      ORDER BY d.last_connection DESC, d.name ASC
-      OFFSET @${offsetIx} ROWS FETCH NEXT @${nextIx} ROWS ONLY
-      `,
-      [...params, offset, pageSize],
+    const rows = await this.withReadUncommittedRetry((manager) =>
+      manager.query(
+        `
+        SELECT
+          d.id AS deviceId,
+          d.device_uuid AS deviceUuid,
+          d.name AS deviceName,
+          d.device_type AS deviceType,
+          d.status,
+          d.last_connection AS lastConnection,
+          (
+            SELECT COUNT(1)
+            FROM sensors s WITH (NOLOCK)
+            WHERE s.device_id = d.id
+          ) AS sensorCount,
+          (
+            SELECT COUNT(1)
+            FROM alerts a WITH (NOLOCK)
+            WHERE a.device_id = d.id
+              AND a.status IN ('active', 'acknowledged')
+          ) AS activeAlerts,
+          (
+            SELECT MAX(a.triggered_at)
+            FROM alerts a WITH (NOLOCK)
+            WHERE a.device_id = d.id
+          ) AS lastAlertAt
+        FROM devices d WITH (NOLOCK)
+        ${whereSql}
+        ORDER BY d.last_connection DESC, d.name ASC
+        OFFSET @${offsetIx} ROWS FETCH NEXT @${nextIx} ROWS ONLY
+        `,
+        [...params, offset, pageSize],
+      ),
     );
 
     return {
@@ -232,118 +297,115 @@ export class CrmService {
     await this.assertDeviceReadAccess(deviceId, ctx);
     const id = String(deviceId);
 
-    let summary = await this.deviceSummaryRepo.findOne({
-      where: { deviceId: id },
-    });
+    return this.withReadUncommittedRetry(async (manager) => {
+      let summary = await manager.getRepository(DeviceProfileSummaryView).findOne({
+        where: { deviceId: id },
+      });
 
-    // Fallback: si la vista no tiene fila (ej: device sin sensores/lecturas), armamos summary desde devices.
-    if (!summary) {
-      const rows = await this.dataSource.query(
+      // Fallback: si la vista no tiene fila (ej: device sin sensores/lecturas), armamos summary desde devices.
+      if (!summary) {
+        const rows = await manager.query(
+          `
+          SELECT
+            d.id AS deviceId,
+            d.device_uuid AS deviceUuid,
+            d.name AS deviceName,
+            d.device_type AS deviceType,
+            d.status,
+            d.last_connection AS lastConnection,
+            (
+              SELECT COUNT(1)
+              FROM sensors s WITH (NOLOCK)
+              WHERE s.device_id = d.id
+            ) AS sensorCount,
+            (
+              SELECT COUNT(1)
+              FROM alerts a WITH (NOLOCK)
+              WHERE a.device_id = d.id
+                AND a.status IN ('active', 'acknowledged')
+            ) AS activeAlerts,
+            (
+              SELECT MAX(a.triggered_at)
+              FROM alerts a WITH (NOLOCK)
+              WHERE a.device_id = d.id
+            ) AS lastAlertAt
+          FROM devices d WITH (NOLOCK)
+          WHERE d.id = @0
+          `,
+          [deviceId],
+        );
+
+        const r = rows?.[0];
+        if (!r) {
+          throw new NotFoundException('Dispositivo no encontrado');
+        }
+
+        summary = {
+          deviceId: String(r.deviceId),
+          deviceUuid: r.deviceUuid,
+          deviceName: r.deviceName,
+          deviceType: r.deviceType,
+          status: r.status,
+          lastConnection:
+            r.lastConnection instanceof Date ? r.lastConnection.toISOString() : r.lastConnection,
+          sensorCount: Number(r.sensorCount ?? 0),
+          activeAlerts: Number(r.activeAlerts ?? 0),
+          lastAlertAt: r.lastAlertAt instanceof Date ? r.lastAlertAt.toISOString() : r.lastAlertAt,
+        } as any;
+      }
+
+      const sensors = await manager.getRepository(Sensor).find({
+        where: { device: { id } as any },
+        order: { id: 'ASC' },
+        relations: ['device'],
+      });
+
+      // Latest readings for this device (from existing view)
+      const latestReadings = await manager.query(
         `
-        SELECT
-          d.id AS deviceId,
-          d.device_uuid AS deviceUuid,
-          d.name AS deviceName,
-          d.device_type AS deviceType,
-          d.status,
-          d.last_connection AS lastConnection,
-          (
-            SELECT COUNT(1)
-            FROM sensors s
-            WHERE s.device_id = d.id
-          ) AS sensorCount,
-          (
-            SELECT COUNT(1)
-            FROM alerts a
-            WHERE a.device_id = d.id
-              AND a.status IN ('active', 'acknowledged')
-          ) AS activeAlerts,
-          (
-            SELECT MAX(a.triggered_at)
-            FROM alerts a
-            WHERE a.device_id = d.id
-          ) AS lastAlertAt
-        FROM devices d
-        WHERE d.id = @0
+        SELECT lr.sensor_id AS sensorId,
+               lr.sensor_uuid AS sensorUuid,
+               lr.sensor_name AS sensorName,
+               lr.sensor_type AS sensorType,
+               lr.unit,
+               lr.latest_value AS latestValue,
+               lr.latest_timestamp AS latestTimestamp
+        FROM v_latest_sensor_readings lr WITH (NOLOCK)
+        JOIN sensors s WITH (NOLOCK) ON s.id = lr.sensor_id
+        WHERE s.device_id = @0
         `,
         [deviceId],
       );
 
-      const r = rows?.[0];
-      if (!r) {
-        throw new NotFoundException('Dispositivo no encontrado');
-      }
+      // Active/ack alerts for this device (CRM history view)
+      const activeAlerts = await manager.query(
+        `
+        SELECT *
+        FROM v_alerts_history WITH (NOLOCK)
+        WHERE device_id = @0
+          AND status IN ('active', 'acknowledged')
+        ORDER BY triggered_at DESC
+        `,
+        [deviceId],
+      );
 
-      summary = {
-        deviceId: String(r.deviceId),
-        deviceUuid: r.deviceUuid,
-        deviceName: r.deviceName,
-        deviceType: r.deviceType,
-        status: r.status,
-        lastConnection:
-          r.lastConnection instanceof Date
-            ? r.lastConnection.toISOString()
-            : r.lastConnection,
-        sensorCount: Number(r.sensorCount ?? 0),
-        activeAlerts: Number(r.activeAlerts ?? 0),
-        lastAlertAt:
-          r.lastAlertAt instanceof Date ? r.lastAlertAt.toISOString() : r.lastAlertAt,
-      } as any;
-    }
+      const lastLocation = await manager.getRepository(DeviceLocation).findOne({
+        where: { device: { id } as any },
+        order: { timestamp: 'DESC' },
+      });
 
-    const sensors = await this.sensorRepo.find({
-      where: { device: { id } as any },
-      order: { id: 'ASC' },
-      relations: ['device'],
+      return {
+        summary,
+        sensors,
+        latestReadings: (latestReadings ?? []).map((r: any) => ({
+          ...r,
+          latestTimestamp:
+            r.latestTimestamp instanceof Date ? r.latestTimestamp.toISOString() : r.latestTimestamp,
+        })),
+        activeAlerts,
+        lastLocation,
+      };
     });
-
-    // Latest readings for this device (from existing view)
-    const latestReadings = await this.dataSource.query(
-      `
-      SELECT lr.sensor_id AS sensorId,
-             lr.sensor_uuid AS sensorUuid,
-             lr.sensor_name AS sensorName,
-             lr.sensor_type AS sensorType,
-             lr.unit,
-             lr.latest_value AS latestValue,
-             lr.latest_timestamp AS latestTimestamp
-      FROM v_latest_sensor_readings lr
-      JOIN sensors s ON s.id = lr.sensor_id
-      WHERE s.device_id = @0
-      `,
-      [deviceId],
-    );
-
-    // Active/ack alerts for this device (CRM history view)
-    const activeAlerts = await this.dataSource.query(
-      `
-      SELECT *
-      FROM v_alerts_history
-      WHERE device_id = @0
-        AND status IN ('active', 'acknowledged')
-      ORDER BY triggered_at DESC
-      `,
-      [deviceId],
-    );
-
-    const lastLocation = await this.locationRepo.findOne({
-      where: { device: { id } as any },
-      order: { timestamp: 'DESC' },
-    });
-
-    return {
-      summary,
-      sensors,
-      latestReadings: latestReadings.map((r: any) => ({
-        ...r,
-        latestTimestamp:
-          r.latestTimestamp instanceof Date
-            ? r.latestTimestamp.toISOString()
-            : r.latestTimestamp,
-      })),
-      activeAlerts,
-      lastLocation,
-    };
   }
 
   private sanitizeTimelineEventForRole(event: any, ctx: AuthCtx) {
@@ -367,58 +429,66 @@ export class CrmService {
     const page = Math.max(1, Math.floor(query.page || 1));
     const pageSize = this.clampPageSize(query.pageSize || 50, 200);
 
-    const qb = this.timelineRepo
-      .createQueryBuilder('t')
-      .where('t.deviceId = :deviceId', { deviceId: String(deviceId) })
-      .orderBy('t.occurredAt', 'DESC')
-      .skip((page - 1) * pageSize)
-      .take(pageSize);
+    return this.withReadUncommittedRetry(async (manager) => {
+      const qb = manager
+        .getRepository(DeviceTimelineView)
+        .createQueryBuilder('t')
+        .setLock('dirty_read')
+        .where('t.deviceId = :deviceId', { deviceId: String(deviceId) })
+        .orderBy('t.occurredAt', 'DESC')
+        .skip((page - 1) * pageSize)
+        .take(pageSize);
 
-    if (query.from) {
-      qb.andWhere('t.occurredAt >= :from', { from: new Date(query.from) });
-    }
-    if (query.to) {
-      qb.andWhere('t.occurredAt <= :to', { to: new Date(query.to) });
-    }
+      if (query.from) {
+        qb.andWhere('t.occurredAt >= :from', { from: new Date(query.from) });
+      }
+      if (query.to) {
+        qb.andWhere('t.occurredAt <= :to', { to: new Date(query.to) });
+      }
 
-    const [items, total] = await qb.getManyAndCount();
+      const [items, total] = await qb.getManyAndCount();
 
-    return {
-      page,
-      pageSize,
-      total,
-      items: items.map((e) => this.sanitizeTimelineEventForRole(e, ctx)),
-    };
+      return {
+        page,
+        pageSize,
+        total,
+        items: items.map((e) => this.sanitizeTimelineEventForRole(e, ctx)),
+      };
+    });
   }
 
   async listAlerts(query: AlertsQuery, ctx: AuthCtx) {
     const page = Math.max(1, Math.floor(query.page || 1));
     const pageSize = this.clampPageSize(query.pageSize || 50, 200);
 
-    const qb = this.alertsHistoryRepo
-      .createQueryBuilder('a')
-      .orderBy('a.triggeredAt', 'DESC');
+    return this.withReadUncommittedRetry(async (manager) => {
+      const qb = manager
+        .getRepository(AlertsHistoryView)
+        .createQueryBuilder('a')
+        .setLock('dirty_read')
+        .orderBy('a.triggeredAt', 'DESC');
 
-    // Nuevo criterio: todos los roles ven todas las alertas.
-    // (Viewer sigue con payload recortado en timeline.)
+      // Nuevo criterio: todos los roles ven todas las alertas.
+      // (Viewer sigue con payload recortado en timeline.)
 
-    if (query.status) qb.andWhere('a.status = :status', { status: query.status });
-    if (query.severity)
-      qb.andWhere('a.severity = :severity', { severity: query.severity });
-    if (query.deviceId)
-      qb.andWhere('a.deviceId = :deviceId', { deviceId: String(query.deviceId) });
-    if (query.sensorId)
-      qb.andWhere('a.sensorId = :sensorId', { sensorId: String(query.sensorId) });
+      if (query.status) qb.andWhere('a.status = :status', { status: query.status });
+      if (query.severity)
+        qb.andWhere('a.severity = :severity', { severity: query.severity });
+      if (query.deviceId)
+        qb.andWhere('a.deviceId = :deviceId', { deviceId: String(query.deviceId) });
+      if (query.sensorId)
+        qb.andWhere('a.sensorId = :sensorId', { sensorId: String(query.sensorId) });
 
-    if (query.from) qb.andWhere('a.triggeredAt >= :from', { from: new Date(query.from) });
-    if (query.to) qb.andWhere('a.triggeredAt <= :to', { to: new Date(query.to) });
+      if (query.from) qb.andWhere('a.triggeredAt >= :from', { from: new Date(query.from) });
+      if (query.to) qb.andWhere('a.triggeredAt <= :to', { to: new Date(query.to) });
 
-    const [items, total] = await qb
-      .skip((page - 1) * pageSize)
-      .take(pageSize)
-      .getManyAndCount();
+      const [items, total] = await qb
+        .skip((page - 1) * pageSize)
+        .take(pageSize)
+        .getManyAndCount();
 
-    return { page, pageSize, total, items };
+      return { page, pageSize, total, items };
+    });
   }
 
   async acknowledgeAlert(alertId: number, ctx: AuthCtx) {
@@ -515,21 +585,25 @@ export class CrmService {
     const requestedSensorIds = this.parseSensorIds(args.sensorIds);
     const maxSensors = this.clampPageSize(args.maxSensors || 6, 50);
 
-    const qb = this.sensorRepo
-      .createQueryBuilder('s')
-      .leftJoin('s.device', 'd')
-      .where('d.id = :deviceId', { deviceId: String(args.deviceId) })
-      .orderBy('s.id', 'ASC');
+    return this.withReadUncommittedRetry(async (manager) => {
+      const qb = manager
+        .getRepository(Sensor)
+        .createQueryBuilder('s')
+        .setLock('dirty_read')
+        .leftJoin('s.device', 'd')
+        .where('d.id = :deviceId', { deviceId: String(args.deviceId) })
+        .orderBy('s.id', 'ASC');
 
-    if (args.onlyActive ?? true) {
-      qb.andWhere('s.isActive = 1');
-    }
+      if (args.onlyActive ?? true) {
+        qb.andWhere('s.isActive = 1');
+      }
 
-    if (requestedSensorIds.length > 0) {
-      qb.andWhere('s.id IN (:...sensorIds)', { sensorIds: requestedSensorIds });
-    }
+      if (requestedSensorIds.length > 0) {
+        qb.andWhere('s.id IN (:...sensorIds)', { sensorIds: requestedSensorIds });
+      }
 
-    return qb.take(maxSensors).getMany();
+      return qb.take(maxSensors).getMany();
+    });
   }
 
   private async getAggregatedPoints(args: {
@@ -552,23 +626,25 @@ export class CrmService {
     const fromIx = args.sensorIds.length;
     const toIx = args.sensorIds.length + 1;
 
-    const rows = await this.dataSource.query(
-      `
-      SELECT
-        sensor_id AS sensorId,
-        bucket_ts AS ts,
-        avg_value AS avg,
-        min_value AS min,
-        max_value AS max,
-        last_value AS last,
-        samples
-      FROM ${table}
-      WHERE sensor_id IN (${inList})
-        AND bucket_ts >= @${fromIx}
-        AND bucket_ts <= @${toIx}
-      ORDER BY sensor_id ASC, bucket_ts ASC
-      `,
-      [...args.sensorIds, args.from, args.to],
+    const rows = await this.withReadUncommittedRetry((manager) =>
+      manager.query(
+        `
+        SELECT
+          sensor_id AS sensorId,
+          bucket_ts AS ts,
+          avg_value AS avg,
+          min_value AS min,
+          max_value AS max,
+          last_value AS last,
+          samples
+        FROM ${table} WITH (NOLOCK)
+        WHERE sensor_id IN (${inList})
+          AND bucket_ts >= @${fromIx}
+          AND bucket_ts <= @${toIx}
+        ORDER BY sensor_id ASC, bucket_ts ASC
+        `,
+        [...args.sensorIds, args.from, args.to],
+      ),
     );
 
     const pointsBySensor = new Map<string, any[]>();
@@ -639,28 +715,32 @@ export class CrmService {
     const since24h = new Date(to.getTime() - 24 * 60 * 60 * 1000);
     const since7d = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-    const alerts24h = await this.dataSource.query(
-      `
-      SELECT a.severity, COUNT(1) AS cnt
-      FROM alerts a
-      WHERE a.device_id = @0
-        AND a.triggered_at >= @1
-        AND a.triggered_at <= @2
-      GROUP BY a.severity
-      `,
-      [deviceId, since24h, to],
+    const alerts24h = await this.withReadUncommittedRetry((manager) =>
+      manager.query(
+        `
+        SELECT a.severity, COUNT(1) AS cnt
+        FROM alerts a WITH (NOLOCK)
+        WHERE a.device_id = @0
+          AND a.triggered_at >= @1
+          AND a.triggered_at <= @2
+        GROUP BY a.severity
+        `,
+        [deviceId, since24h, to],
+      ),
     );
 
-    const alerts7d = await this.dataSource.query(
-      `
-      SELECT a.severity, COUNT(1) AS cnt
-      FROM alerts a
-      WHERE a.device_id = @0
-        AND a.triggered_at >= @1
-        AND a.triggered_at <= @2
-      GROUP BY a.severity
-      `,
-      [deviceId, since7d, to],
+    const alerts7d = await this.withReadUncommittedRetry((manager) =>
+      manager.query(
+        `
+        SELECT a.severity, COUNT(1) AS cnt
+        FROM alerts a WITH (NOLOCK)
+        WHERE a.device_id = @0
+          AND a.triggered_at >= @1
+          AND a.triggered_at <= @2
+        GROUP BY a.severity
+        `,
+        [deviceId, since7d, to],
+      ),
     );
 
     const toMap = (arr: any[]) =>
@@ -705,78 +785,94 @@ export class CrmService {
     const eventsLimit = this.clampPageSize(query.eventsLimit || 50, 200);
     const topDevicesLimit = this.clampPageSize(query.topDevicesLimit || 10, 100);
 
-    // KPIs: dispositivos por status
-    const devicesByStatus = await this.dataSource.query(
-      `
-      SELECT d.status, COUNT(1) AS cnt
-      FROM devices d
-      GROUP BY d.status
-      `,
-      [],
-    );
+    const {
+      devicesByStatus,
+      activeAlertsBySeverity,
+      topDevicesByActiveAlerts,
+      alertQueue,
+      recentEvents,
+    } = await this.withReadUncommittedRetry(async (manager) => {
+      // KPIs: dispositivos por status
+      const devicesByStatus = await manager.query(
+        `
+        SELECT d.status, COUNT(1) AS cnt
+        FROM devices d WITH (NOLOCK)
+        GROUP BY d.status
+        `,
+        [],
+      );
 
-    // KPIs: alertas activas por severidad (estado actual)
-    const activeAlertsBySeverity = await this.dataSource.query(
-      `
-      SELECT a.severity, COUNT(1) AS cnt
-      FROM alerts a
-      WHERE a.status IN ('active', 'acknowledged')
-      GROUP BY a.severity
-      `,
-      [],
-    );
+      // KPIs: alertas activas por severidad (estado actual)
+      const activeAlertsBySeverity = await manager.query(
+        `
+        SELECT a.severity, COUNT(1) AS cnt
+        FROM alerts a WITH (NOLOCK)
+        WHERE a.status IN ('active', 'acknowledged')
+        GROUP BY a.severity
+        `,
+        [],
+      );
 
-    // Top devices por # alertas activas
-    const topDevicesByActiveAlerts = await this.dataSource.query(
-      `
-      SELECT TOP (${topDevicesLimit})
-        a.device_id AS deviceId,
-        d.device_uuid AS deviceUuid,
-        d.name AS deviceName,
-        COUNT(1) AS activeAlerts
-      FROM alerts a
-      JOIN devices d ON d.id = a.device_id
-      WHERE a.status IN ('active', 'acknowledged')
-      GROUP BY a.device_id, d.device_uuid, d.name
-      ORDER BY COUNT(1) DESC, d.name ASC
-      `,
-      [],
-    );
+      // Top devices por # alertas activas
+      const topDevicesByActiveAlerts = await manager.query(
+        `
+        SELECT TOP (${topDevicesLimit})
+          a.device_id AS deviceId,
+          d.device_uuid AS deviceUuid,
+          d.name AS deviceName,
+          COUNT(1) AS activeAlerts
+        FROM alerts a WITH (NOLOCK)
+        JOIN devices d WITH (NOLOCK) ON d.id = a.device_id
+        WHERE a.status IN ('active', 'acknowledged')
+        GROUP BY a.device_id, d.device_uuid, d.name
+        ORDER BY COUNT(1) DESC, d.name ASC
+        `,
+        [],
+      );
 
-    // Alert queue: últimas alertas activas/ack (filtrado por rango opcional)
-    const alertQueue = await this.dataSource.query(
-      `
-      SELECT TOP (${alertsLimit}) *
-      FROM v_alerts_history
-      WHERE status IN ('active', 'acknowledged')
-        AND triggered_at >= @0
-        AND triggered_at <= @1
-      ORDER BY triggered_at DESC
-      `,
-      [from, to],
-    );
+      // Alert queue: últimas alertas activas/ack (filtrado por rango opcional)
+      const alertQueue = await manager.query(
+        `
+        SELECT TOP (${alertsLimit}) *
+        FROM v_alerts_history WITH (NOLOCK)
+        WHERE status IN ('active', 'acknowledged')
+          AND triggered_at >= @0
+          AND triggered_at <= @1
+        ORDER BY triggered_at DESC
+        `,
+        [from, to],
+      );
 
-    // Timeline global: últimos eventos (filtrado por rango)
-    const recentEvents = await this.dataSource.query(
-      `
-      SELECT TOP (${eventsLimit})
-        t.event_type AS eventType,
-        t.device_id AS deviceId,
-        d.device_uuid AS deviceUuid,
-        d.name AS deviceName,
-        t.sensor_id AS sensorId,
-        t.occurred_at AS occurredAt,
-        t.severity,
-        t.title,
-        t.payload
-      FROM v_device_timeline t
-      JOIN devices d ON d.id = t.device_id
-      WHERE t.occurred_at >= @0
-        AND t.occurred_at <= @1
-      ORDER BY t.occurred_at DESC
-      `,
-      [from, to],
-    );
+      // Timeline global: últimos eventos (filtrado por rango)
+      const recentEvents = await manager.query(
+        `
+        SELECT TOP (${eventsLimit})
+          t.event_type AS eventType,
+          t.device_id AS deviceId,
+          d.device_uuid AS deviceUuid,
+          d.name AS deviceName,
+          t.sensor_id AS sensorId,
+          t.occurred_at AS occurredAt,
+          t.severity,
+          t.title,
+          t.payload
+        FROM v_device_timeline t WITH (NOLOCK)
+        JOIN devices d WITH (NOLOCK) ON d.id = t.device_id
+        WHERE t.occurred_at >= @0
+          AND t.occurred_at <= @1
+        ORDER BY t.occurred_at DESC
+        `,
+        [from, to],
+      );
+
+      return {
+        devicesByStatus,
+        activeAlertsBySeverity,
+        topDevicesByActiveAlerts,
+        alertQueue,
+        recentEvents,
+      };
+    });
 
     const asMap = (arr: any[], key: string) =>
       arr.reduce((acc, x) => {
@@ -784,7 +880,7 @@ export class CrmService {
         return acc;
       }, {} as Record<string, number>);
 
-      return {
+    return {
       from: from.toISOString(),
       to: to.toISOString(),
       kpis: {
@@ -803,7 +899,9 @@ export class CrmService {
 
   async getMlEventsBadge(ctx: AuthCtx) {
     // Por ahora todos los roles ven todos los eventos ML activos.
-    const total = await this.mlEventActiveRepo.count();
+    const total = await this.withReadUncommittedRetry(async (manager) =>
+      manager.getRepository(MlEventActiveView).count(),
+    );
     return { totalActiveMlEvents: total };
   }
 
@@ -811,32 +909,36 @@ export class CrmService {
     const page = Math.max(1, Math.floor(query.page || 1));
     const pageSize = this.clampPageSize(query.pageSize || 50, 200);
 
-    const qb = this.mlEventActiveRepo
-      .createQueryBuilder('e')
-      .orderBy('e.createdAt', 'DESC');
+    return this.withReadUncommittedRetry(async (manager) => {
+      const qb = manager
+        .getRepository(MlEventActiveView)
+        .createQueryBuilder('e')
+        .setLock('dirty_read')
+        .orderBy('e.createdAt', 'DESC');
 
-    if (query.deviceId) qb.andWhere('e.deviceId = :deviceId', { deviceId: query.deviceId });
-    if (query.sensorId) qb.andWhere('e.sensorId = :sensorId', { sensorId: query.sensorId });
-    if (query.eventType) qb.andWhere('e.eventType = :eventType', { eventType: query.eventType });
-    if (query.eventCode) qb.andWhere('e.eventCode = :eventCode', { eventCode: query.eventCode });
+      if (query.deviceId) qb.andWhere('e.deviceId = :deviceId', { deviceId: query.deviceId });
+      if (query.sensorId) qb.andWhere('e.sensorId = :sensorId', { sensorId: query.sensorId });
+      if (query.eventType) qb.andWhere('e.eventType = :eventType', { eventType: query.eventType });
+      if (query.eventCode) qb.andWhere('e.eventCode = :eventCode', { eventCode: query.eventCode });
 
-    if (query.from) qb.andWhere('e.createdAt >= :from', { from: new Date(query.from) });
-    if (query.to) qb.andWhere('e.createdAt <= :to', { to: new Date(query.to) });
+      if (query.from) qb.andWhere('e.createdAt >= :from', { from: new Date(query.from) });
+      if (query.to) qb.andWhere('e.createdAt <= :to', { to: new Date(query.to) });
 
-    const [items, total] = await qb
-      .skip((page - 1) * pageSize)
-      .take(pageSize)
-      .getManyAndCount();
+      const [items, total] = await qb
+        .skip((page - 1) * pageSize)
+        .take(pageSize)
+        .getManyAndCount();
 
-    return {
-      page,
-      pageSize,
-      total,
-      items: items.map((e) => ({
-        ...e,
-        createdAt: e.createdAt instanceof Date ? e.createdAt.toISOString() : e.createdAt,
-      })),
-    };
+      return {
+        page,
+        pageSize,
+        total,
+        items: items.map((e) => ({
+          ...e,
+          createdAt: e.createdAt instanceof Date ? e.createdAt.toISOString() : e.createdAt,
+        })),
+      };
+    });
   }
 
   async getDeviceProfileFull(deviceId: number, query: DeviceProfileFullQuery, ctx: AuthCtx) {
@@ -854,64 +956,163 @@ export class CrmService {
     const maxPoints = this.clampPageSize(query.maxPoints || 400, 2000);
     const bucket = query.bucket ?? this.chooseBucket(from, to, maxPoints);
 
-    let summary = await this.deviceSummaryRepo.findOne({
-      where: { deviceId: String(deviceId) },
-    });
+    const {
+      summary,
+      latestReadings,
+      activeAlerts,
+      lastLocation,
+      alerts24h,
+      alerts7d,
+    } = await this.withReadUncommittedRetry(async (manager) => {
+      let summary = await manager.getRepository(DeviceProfileSummaryView).findOne({
+        where: { deviceId: String(deviceId) },
+      });
 
-    // Fallback: si la vista no tiene fila (ej: device sin sensores/lecturas), armamos summary desde devices.
-    if (!summary) {
-      const rows = await this.dataSource.query(
+      // Fallback: si la vista no tiene fila (ej: device sin sensores/lecturas), armamos summary desde devices.
+      if (!summary) {
+        const rows = await manager.query(
+          `
+          SELECT
+            d.id AS deviceId,
+            d.device_uuid AS deviceUuid,
+            d.name AS deviceName,
+            d.device_type AS deviceType,
+            d.status,
+            d.last_connection AS lastConnection,
+            (
+              SELECT COUNT(1)
+              FROM sensors s WITH (NOLOCK)
+              WHERE s.device_id = d.id
+            ) AS sensorCount,
+            (
+              SELECT COUNT(1)
+              FROM alerts a WITH (NOLOCK)
+              WHERE a.device_id = d.id
+                AND a.status IN ('active', 'acknowledged')
+            ) AS activeAlerts,
+            (
+              SELECT MAX(a.triggered_at)
+              FROM alerts a WITH (NOLOCK)
+              WHERE a.device_id = d.id
+            ) AS lastAlertAt
+          FROM devices d WITH (NOLOCK)
+          WHERE d.id = @0
+          `,
+          [deviceId],
+        );
+
+        const r = rows?.[0];
+        if (!r) {
+          throw new NotFoundException('Dispositivo no encontrado');
+        }
+
+        summary = {
+          deviceId: String(r.deviceId),
+          deviceUuid: r.deviceUuid,
+          deviceName: r.deviceName,
+          deviceType: r.deviceType,
+          status: r.status,
+          lastConnection:
+            r.lastConnection instanceof Date ? r.lastConnection.toISOString() : r.lastConnection,
+          sensorCount: Number(r.sensorCount ?? 0),
+          activeAlerts: Number(r.activeAlerts ?? 0),
+          lastAlertAt: r.lastAlertAt instanceof Date ? r.lastAlertAt.toISOString() : r.lastAlertAt,
+        } as any;
+      }
+
+      // Latest readings: si hay sensores filtrados, limitamos el resultado
+      const latestReadings = await manager.query(
+        query.sensorIds && query.sensorIds.trim() && query.sensorIds.split(',').filter(Boolean).length > 0
+          ? `
+            SELECT lr.sensor_id AS sensorId,
+                   lr.sensor_uuid AS sensorUuid,
+                   lr.sensor_name AS sensorName,
+                   lr.sensor_type AS sensorType,
+                   lr.unit,
+                   lr.latest_value AS latestValue,
+                   lr.latest_timestamp AS latestTimestamp
+            FROM v_latest_sensor_readings lr WITH (NOLOCK)
+            WHERE lr.sensor_id IN (${String(query.sensorIds)
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+              .map((_, i) => `@${i}`)
+              .join(',')})
+          `
+          : `
+            SELECT lr.sensor_id AS sensorId,
+                   lr.sensor_uuid AS sensorUuid,
+                   lr.sensor_name AS sensorName,
+                   lr.sensor_type AS sensorType,
+                   lr.unit,
+                   lr.latest_value AS latestValue,
+                   lr.latest_timestamp AS latestTimestamp
+            FROM v_latest_sensor_readings lr WITH (NOLOCK)
+            JOIN sensors s WITH (NOLOCK) ON s.id = lr.sensor_id
+            WHERE s.device_id = @0
+          `,
+        query.sensorIds && query.sensorIds.trim() && query.sensorIds.split(',').filter(Boolean).length > 0
+          ? String(query.sensorIds)
+              .split(',')
+              .map((s) => Number(s.trim()))
+              .filter(Number.isFinite)
+          : [deviceId],
+      );
+
+      const alertsLimit = this.clampPageSize(query.alertsLimit || 50, 200);
+      const activeAlerts = await manager.query(
         `
-        SELECT
-          d.id AS deviceId,
-          d.device_uuid AS deviceUuid,
-          d.name AS deviceName,
-          d.device_type AS deviceType,
-          d.status,
-          d.last_connection AS lastConnection,
-          (
-            SELECT COUNT(1)
-            FROM sensors s
-            WHERE s.device_id = d.id
-          ) AS sensorCount,
-          (
-            SELECT COUNT(1)
-            FROM alerts a
-            WHERE a.device_id = d.id
-              AND a.status IN ('active', 'acknowledged')
-          ) AS activeAlerts,
-          (
-            SELECT MAX(a.triggered_at)
-            FROM alerts a
-            WHERE a.device_id = d.id
-          ) AS lastAlertAt
-        FROM devices d
-        WHERE d.id = @0
+        SELECT TOP (${alertsLimit}) *
+        FROM v_alerts_history WITH (NOLOCK)
+        WHERE device_id = @0
+          AND status IN ('active', 'acknowledged')
+        ORDER BY triggered_at DESC
         `,
         [deviceId],
       );
 
-      const r = rows?.[0];
-      if (!r) {
-        throw new NotFoundException('Dispositivo no encontrado');
-      }
+      const lastLocation = await manager.getRepository(DeviceLocation).findOne({
+        where: { device: { id: String(deviceId) } as any },
+        order: { timestamp: 'DESC' },
+      });
 
-      summary = {
-        deviceId: String(r.deviceId),
-        deviceUuid: r.deviceUuid,
-        deviceName: r.deviceName,
-        deviceType: r.deviceType,
-        status: r.status,
-        lastConnection:
-          r.lastConnection instanceof Date
-            ? r.lastConnection.toISOString()
-            : r.lastConnection,
-        sensorCount: Number(r.sensorCount ?? 0),
-        activeAlerts: Number(r.activeAlerts ?? 0),
-        lastAlertAt:
-          r.lastAlertAt instanceof Date ? r.lastAlertAt.toISOString() : r.lastAlertAt,
-      } as any;
-    }
+      // KPIs (24h/7d)
+      const since24h = new Date(to.getTime() - 24 * 60 * 60 * 1000);
+      const since7d = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+      const alerts24h = await manager.query(
+        `
+        SELECT a.severity, COUNT(1) AS cnt
+        FROM alerts a WITH (NOLOCK)
+        WHERE a.device_id = @0
+          AND a.triggered_at >= @1
+          AND a.triggered_at <= @2
+        GROUP BY a.severity
+        `,
+        [deviceId, since24h, to],
+      );
+
+      const alerts7d = await manager.query(
+        `
+        SELECT a.severity, COUNT(1) AS cnt
+        FROM alerts a WITH (NOLOCK)
+        WHERE a.device_id = @0
+          AND a.triggered_at >= @1
+          AND a.triggered_at <= @2
+        GROUP BY a.severity
+        `,
+        [deviceId, since7d, to],
+      );
+
+      return {
+        summary,
+        latestReadings,
+        activeAlerts,
+        lastLocation,
+        alerts24h,
+        alerts7d,
+      };
+    });
 
     const sensors = await this.resolveDeviceSensors({
       deviceId,
@@ -933,80 +1134,6 @@ export class CrmService {
       bucket,
     });
 
-    // Latest readings: si hay sensores filtrados, limitamos el resultado
-    const latestReadings = await this.dataSource.query(
-      sensors.length > 0
-        ? `
-          SELECT lr.sensor_id AS sensorId,
-                 lr.sensor_uuid AS sensorUuid,
-                 lr.sensor_name AS sensorName,
-                 lr.sensor_type AS sensorType,
-                 lr.unit,
-                 lr.latest_value AS latestValue,
-                 lr.latest_timestamp AS latestTimestamp
-          FROM v_latest_sensor_readings lr
-          WHERE lr.sensor_id IN (${sensorIdNums.map((_, i) => `@${i}`).join(',')})
-        `
-        : `
-          SELECT lr.sensor_id AS sensorId,
-                 lr.sensor_uuid AS sensorUuid,
-                 lr.sensor_name AS sensorName,
-                 lr.sensor_type AS sensorType,
-                 lr.unit,
-                 lr.latest_value AS latestValue,
-                 lr.latest_timestamp AS latestTimestamp
-          FROM v_latest_sensor_readings lr
-          JOIN sensors s ON s.id = lr.sensor_id
-          WHERE s.device_id = @0
-        `,
-      sensors.length > 0 ? sensorIdNums : [deviceId],
-    );
-
-    const alertsLimit = this.clampPageSize(query.alertsLimit || 50, 200);
-    const activeAlerts = await this.dataSource.query(
-      `
-      SELECT TOP (${alertsLimit}) *
-      FROM v_alerts_history
-      WHERE device_id = @0
-        AND status IN ('active', 'acknowledged')
-      ORDER BY triggered_at DESC
-      `,
-      [deviceId],
-    );
-
-    const lastLocation = await this.locationRepo.findOne({
-      where: { device: { id: String(deviceId) } as any },
-      order: { timestamp: 'DESC' },
-    });
-
-    // KPIs (24h/7d)
-    const since24h = new Date(to.getTime() - 24 * 60 * 60 * 1000);
-    const since7d = new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-    const alerts24h = await this.dataSource.query(
-      `
-      SELECT a.severity, COUNT(1) AS cnt
-      FROM alerts a
-      WHERE a.device_id = @0
-        AND a.triggered_at >= @1
-        AND a.triggered_at <= @2
-      GROUP BY a.severity
-      `,
-      [deviceId, since24h, to],
-    );
-
-    const alerts7d = await this.dataSource.query(
-      `
-      SELECT a.severity, COUNT(1) AS cnt
-      FROM alerts a
-      WHERE a.device_id = @0
-        AND a.triggered_at >= @1
-        AND a.triggered_at <= @2
-      GROUP BY a.severity
-      `,
-      [deviceId, since7d, to],
-    );
-
     const toMap = (arr: any[]) =>
       arr.reduce((acc, x) => {
         acc[String(x.severity)] = Number(x.cnt);
@@ -1027,7 +1154,7 @@ export class CrmService {
         isActive: s.isActive,
         points: pointsBySensor.get(String(s.id)) ?? [],
       })),
-      latestReadings: latestReadings.map((r: any) => ({
+      latestReadings: (latestReadings ?? []).map((r: any) => ({
         ...r,
         latestTimestamp:
           r.latestTimestamp instanceof Date
@@ -1066,22 +1193,24 @@ export class CrmService {
           ? 'sensor_readings_5m'
           : 'sensor_readings_1h';
 
-    const rows = await this.dataSource.query(
-      `
-      SELECT
-        bucket_ts AS ts,
-        avg_value AS avg,
-        min_value AS min,
-        max_value AS max,
-        last_value AS last,
-        samples
-      FROM ${table}
-      WHERE sensor_id = @0
-        AND bucket_ts >= @1
-        AND bucket_ts <= @2
-      ORDER BY bucket_ts ASC
-      `,
-      [sensorId, from, to],
+    const rows = await this.withReadUncommittedRetry((manager) =>
+      manager.query(
+        `
+        SELECT
+          bucket_ts AS ts,
+          avg_value AS avg,
+          min_value AS min,
+          max_value AS max,
+          last_value AS last,
+          samples
+        FROM ${table} WITH (NOLOCK)
+        WHERE sensor_id = @0
+          AND bucket_ts >= @1
+          AND bucket_ts <= @2
+        ORDER BY bucket_ts ASC
+        `,
+        [sensorId, from, to],
+      ),
     );
 
     return {
