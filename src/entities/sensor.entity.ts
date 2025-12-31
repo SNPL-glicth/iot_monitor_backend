@@ -4,6 +4,7 @@ import {
   JoinColumn,
   ManyToOne,
   OneToMany,
+  OneToOne,
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { Device } from './device.entity';
@@ -12,6 +13,7 @@ import { AlertThreshold } from './alert-threshold.entity';
 import { Alert } from './alert.entity';
 import { MlModel } from './ml-model.entity';
 import { Prediction } from './prediction.entity';
+import { SensorThresholdProfile } from './sensor-threshold-profile.entity';
 
 @Entity({ name: 'sensors' })
 export class Sensor {
@@ -57,4 +59,7 @@ export class Sensor {
 
   @OneToMany(() => Prediction, (p) => p.sensor)
   predictions!: Prediction[];
+
+  @OneToOne(() => SensorThresholdProfile, (p) => p.sensor)
+  thresholdProfile?: SensorThresholdProfile;
 }

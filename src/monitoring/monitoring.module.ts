@@ -9,6 +9,7 @@ import { Sensor } from '../entities/sensor.entity';
 import { SensorReading } from '../entities/sensor-reading.entity';
 import { Alert } from '../entities/alert.entity';
 import { AlertThreshold } from '../entities/alert-threshold.entity';
+import { SensorThresholdProfile } from '../entities/sensor-threshold-profile.entity';
 import { ThresholdHistory } from '../entities/threshold-history.entity';
 import { Prediction } from '../entities/prediction.entity';
 import {
@@ -28,6 +29,7 @@ import {
       SensorReading,
       Alert,
       AlertThreshold,
+      SensorThresholdProfile,
       ThresholdHistory,
       Prediction,
       DeviceWithSensorsView,

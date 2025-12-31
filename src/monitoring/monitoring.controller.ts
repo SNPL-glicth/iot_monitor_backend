@@ -109,6 +109,34 @@ export class MonitoringController {
   }
 
   /**
+   * GET /monitoring/sensors/:sensorId/threshold-profile
+   * Perfil explícito WARNING/ALERT + cooldown.
+   */
+  @Get('sensors/:sensorId/threshold-profile')
+  @Roles('admin', 'operator', 'viewer')
+  getSensorThresholdProfile(@Param('sensorId', ParseIntPipe) sensorId: number) {
+    return this.monitoringService.getSensorThresholdProfile(sensorId);
+  }
+
+  /**
+   * PATCH /monitoring/sensors/:sensorId/threshold-profile
+   */
+  @Patch('sensors/:sensorId/threshold-profile')
+  @Roles('admin')
+  updateSensorThresholdProfile(
+    @Param('sensorId', ParseIntPipe) sensorId: number,
+    @Body() body: any,
+  ) {
+    return this.monitoringService.upsertSensorThresholdProfile(sensorId, {
+      warningMin: body?.warningMin ?? null,
+      warningMax: body?.warningMax ?? null,
+      alertMin: body?.alertMin ?? null,
+      alertMax: body?.alertMax ?? null,
+      cooldownSeconds: body?.cooldownSeconds,
+    });
+  }
+
+  /**
    * POST /monitoring/sensors/:sensorId/thresholds
    * Crea un umbral para un sensor.
    */

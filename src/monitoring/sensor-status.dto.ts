@@ -43,6 +43,6 @@ export type SensorConsolidatedStatus = {
   sensor_id: number;
   final_state: SensorFinalState;
   alert_active: ActiveAlert | null;
-  warning_active: ActiveWarning | null;
+  warning_active: ActiveWarning[];
   prediction_current: CurrentPrediction | null;
 };

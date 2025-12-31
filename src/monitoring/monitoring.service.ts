@@ -11,6 +11,7 @@ import { Sensor } from '../entities/sensor.entity';
 import { SensorReading } from '../entities/sensor-reading.entity';
 import { Alert } from '../entities/alert.entity';
 import { AlertThreshold } from '../entities/alert-threshold.entity';
+import { SensorThresholdProfile } from '../entities/sensor-threshold-profile.entity';
 import { ThresholdHistory } from '../entities/threshold-history.entity';
 import { Prediction } from '../entities/prediction.entity';
 import {
@@ -36,6 +37,8 @@ export class MonitoringService {
     private readonly alertRepo: Repository<Alert>,
     @InjectRepository(AlertThreshold)
     private readonly thresholdRepo: Repository<AlertThreshold>,
+    @InjectRepository(SensorThresholdProfile)
+    private readonly thresholdProfileRepo: Repository<SensorThresholdProfile>,
     @InjectRepository(ThresholdHistory)
     private readonly thresholdHistoryRepo: Repository<ThresholdHistory>,
     @InjectRepository(DeviceWithSensorsView)
@@ -53,6 +56,33 @@ export class MonitoringService {
     private readonly dataSource: DataSource,
     private readonly notificationsService: NotificationsService,
   ) {}
+
+  private normalizeNullableNumberString(v: unknown): string | null {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+    if (typeof v === 'string') {
+      const s = v.trim();
+      if (s === '') return null;
+      const n = Number(s);
+      if (!Number.isFinite(n)) {
+        throw new BadRequestException('Valor numérico inválido');
+      }
+      return String(n);
+    }
+    throw new BadRequestException('Valor numérico inválido');
+  }
+
+  private validateMinMaxPair(label: string, min: string | null, max: string | null) {
+    if (min === null || max === null) return;
+    const nMin = Number(min);
+    const nMax = Number(max);
+    if (!Number.isFinite(nMin) || !Number.isFinite(nMax)) {
+      throw new BadRequestException(`${label}: valores inválidos`);
+    }
+    if (nMin > nMax) {
+      throw new BadRequestException(`${label}: min no puede ser mayor que max`);
+    }
+  }
 
   private isDeadlock1205(err: any): boolean {
     const n =
@@ -124,6 +154,43 @@ export class MonitoringService {
     }
   }
 
+  private mapThresholdSeverityToState(severity: string | null | undefined): 'alert' | 'warning' {
+    const s = String(severity ?? '').toLowerCase();
+    if (s === 'critical') return 'alert';
+    return 'warning';
+  }
+
+  private parseDecimalOrNull(v: unknown): number | null {
+    if (v === null || v === undefined) return null;
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    return null;
+  }
+
+  private isOutOfRange(value: number, min: number | null, max: number | null): boolean {
+    if (min === null && max === null) return false;
+    if (min !== null && value < min) return true;
+    if (max !== null && value > max) return true;
+    return false;
+  }
+
+  private computeProfileState(args: {
+    value: number;
+    warningMin: number | null;
+    warningMax: number | null;
+    alertMin: number | null;
+    alertMax: number | null;
+  }): 'normal' | 'warning' | 'alert' {
+    const isAlert = this.isOutOfRange(args.value, args.alertMin, args.alertMax);
+    if (isAlert) return 'alert';
+    const isWarn = this.isOutOfRange(args.value, args.warningMin, args.warningMax);
+    if (isWarn) return 'warning';
+    return 'normal';
+  }
+
   private computeFinalState(args: {
     alertActive: any | null;
     warningActive: any | null;
@@ -144,7 +211,10 @@ export class MonitoringService {
         throw new NotFoundException('Sensor no existe');
       }
 
-      const [alertRow] = await manager.query(
+      // Umbrales físicos (tabla alerts):
+      // - critical => ALERT
+      // - warning/info => WARNING
+      const [criticalAlertRow] = await manager.query(
         `
         SELECT TOP 1
           id,
@@ -158,6 +228,27 @@ export class MonitoringService {
         FROM dbo.alerts WITH (NOLOCK)
         WHERE sensor_id = @0
           AND status = 'active'
+          AND LOWER(severity) = 'critical'
+        ORDER BY triggered_at DESC
+        `,
+        [sensorId],
+      );
+
+      const [thresholdWarningRow] = await manager.query(
+        `
+        SELECT TOP 1
+          id,
+          sensor_id      AS sensor_id,
+          device_id      AS device_id,
+          threshold_id   AS threshold_id,
+          severity,
+          status,
+          triggered_value AS triggered_value,
+          triggered_at    AS triggered_at
+        FROM dbo.alerts WITH (NOLOCK)
+        WHERE sensor_id = @0
+          AND status = 'active'
+          AND LOWER(severity) <> 'critical'
         ORDER BY triggered_at DESC
         `,
         [sensorId],
@@ -215,34 +306,60 @@ export class MonitoringService {
       );
 
       const alert_active =
-        alertRow
+        criticalAlertRow
           ? {
-              id: Number(alertRow.id),
-              sensor_id: Number(alertRow.sensor_id),
-              device_id: Number(alertRow.device_id),
-              threshold_id: Number(alertRow.threshold_id),
-              severity: String(alertRow.severity),
-              status: String(alertRow.status),
-              triggered_value: Number(alertRow.triggered_value),
-              triggered_at: alertRow.triggered_at,
+              id: Number(criticalAlertRow.id),
+              sensor_id: Number(criticalAlertRow.sensor_id),
+              device_id: Number(criticalAlertRow.device_id),
+              threshold_id: Number(criticalAlertRow.threshold_id),
+              severity: String(criticalAlertRow.severity),
+              status: String(criticalAlertRow.status),
+              triggered_value: Number(criticalAlertRow.triggered_value),
+              triggered_at: criticalAlertRow.triggered_at,
             }
           : null;
 
-      const warning_active =
-        warningRow
-          ? {
-              id: Number(warningRow.id),
-              sensor_id: Number(warningRow.sensor_id),
-              device_id: Number(warningRow.device_id),
-              event_type: String(warningRow.event_type),
-              event_code: String(warningRow.event_code),
-              status: String(warningRow.status),
-              created_at: warningRow.created_at,
-              title: warningRow.title ?? null,
-              message: warningRow.message ?? null,
-              payload: this.safeJsonParse(warningRow.payload),
-            }
-          : null;
+      // Unificamos WARNING en una estructura homogénea (lista) para:
+      // - eventos ML (ml_events)
+      // - alertas físicas NO críticas (alerts severity != critical)
+      const warning_items: any[] = [];
+
+      if (warningRow) {
+        warning_items.push({
+          id: Number(warningRow.id),
+          sensor_id: Number(warningRow.sensor_id),
+          device_id: Number(warningRow.device_id),
+          event_type: String(warningRow.event_type),
+          event_code: String(warningRow.event_code),
+          status: String(warningRow.status),
+          created_at: warningRow.created_at,
+          title: warningRow.title ?? null,
+          message: warningRow.message ?? null,
+          payload: this.safeJsonParse(warningRow.payload),
+        });
+      }
+
+      if (thresholdWarningRow) {
+        warning_items.push({
+          id: Number(thresholdWarningRow.id),
+          sensor_id: Number(thresholdWarningRow.sensor_id),
+          device_id: Number(thresholdWarningRow.device_id),
+          event_type: this.mapThresholdSeverityToState(thresholdWarningRow.severity) === 'alert'
+            ? 'critical'
+            : 'warning',
+          event_code: 'THRESHOLD_BREACH',
+          status: String(thresholdWarningRow.status),
+          created_at: thresholdWarningRow.triggered_at,
+          title: 'Umbral físico',
+          message: `Valor fuera de umbral: ${thresholdWarningRow.triggered_value}`,
+          payload: {
+            threshold_id: Number(thresholdWarningRow.threshold_id),
+            severity: String(thresholdWarningRow.severity),
+            triggered_value: Number(thresholdWarningRow.triggered_value),
+            triggered_at: thresholdWarningRow.triggered_at,
+          },
+        });
+      }
 
       const prediction_current =
         predictionRow
@@ -257,6 +374,10 @@ export class MonitoringService {
             }
           : null;
 
+      // Tomamos 1 warning “activo” representativo (si hay varios), pero mantenemos
+      // el array completo para UI de histórico.
+      const warning_active = warning_items.length > 0 ? warning_items[0] : null;
+
       const final_state = this.computeFinalState({
         alertActive: alert_active,
         warningActive: warning_active,
@@ -267,7 +388,7 @@ export class MonitoringService {
         sensor_id: Number(sensorId),
         final_state,
         alert_active,
-        warning_active,
+        warning_active: warning_items,
         prediction_current,
       };
     });
@@ -545,28 +666,166 @@ export class MonitoringService {
    * Esto también evaluará los umbrales y generará alertas si corresponde.
    */
   async insertSensorReading(sensorId: number, value: number) {
-    // Ejecutamos el SP que inserta la lectura y genera alertas si corresponde.
-    const result = await this.dataSource.query(
-      'EXEC sp_insert_reading_and_check_threshold @p_sensor_id = ?, @p_value = ?',
-      [sensorId, value],
-    );
-
-    // Si el SP devuelve el id de alerta creada, intenta enviar push.
-    // Ajusta esto según el contrato real de tu SP (a veces devuelve un recordset).
-    try {
-      if (Array.isArray(result) && result.length > 0) {
-        const maybeRow = result[0];
-        const alertId = maybeRow?.alert_id ?? maybeRow?.alertId ?? maybeRow?.id;
-        if (alertId) {
-          await this.notificationsService.sendAlertNotification(String(alertId));
-        }
-      }
-    } catch (e) {
-      // Nunca rompemos la ingesta por un fallo de notificación.
-      // Solo dejamos log para debug.
-      // eslint-disable-next-line no-console
-      console.error('Error sending alert push notification', e);
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) {
+      throw new BadRequestException('Valor inválido');
     }
+
+    await this.dataSource.transaction(async (manager) => {
+      const sensor = await manager.getRepository(Sensor).findOne({
+        where: { id: String(sensorId) },
+        relations: ['device', 'thresholdProfile'],
+      });
+      if (!sensor) throw new NotFoundException('Sensor no existe');
+
+      const now = new Date();
+
+      // 1) Insert lectura histórica
+      const reading = manager.getRepository(SensorReading).create({
+        sensor,
+        value: String(numericValue),
+        timestamp: now,
+      });
+      await manager.getRepository(SensorReading).save(reading);
+
+      // 2) Actualizar tabla materializada latest (evita escaneos)
+      await manager.query(
+        `
+        MERGE dbo.sensor_readings_latest AS tgt
+        USING (SELECT @0 AS sensor_id, @1 AS latest_value, @2 AS latest_timestamp) AS src
+          ON tgt.sensor_id = src.sensor_id
+        WHEN MATCHED THEN
+          UPDATE SET tgt.latest_value = src.latest_value, tgt.latest_timestamp = src.latest_timestamp
+        WHEN NOT MATCHED THEN
+          INSERT (sensor_id, latest_value, latest_timestamp)
+          VALUES (src.sensor_id, src.latest_value, src.latest_timestamp);
+        `,
+        [sensorId, numericValue, now],
+      );
+
+      // 3) Evaluación con perfil explícito
+      const profile = sensor.thresholdProfile ?? null;
+      if (!profile) {
+        // Sin perfil, solo persistimos lecturas.
+        return;
+      }
+
+      const warningMin = this.parseDecimalOrNull(profile.warningMin);
+      const warningMax = this.parseDecimalOrNull(profile.warningMax);
+      const alertMin = this.parseDecimalOrNull(profile.alertMin);
+      const alertMax = this.parseDecimalOrNull(profile.alertMax);
+      const cooldownSeconds = Math.max(0, Math.floor(profile.cooldownSeconds ?? 0));
+
+      const newState = this.computeProfileState({
+        value: numericValue,
+        warningMin,
+        warningMax,
+        alertMin,
+        alertMax,
+      });
+
+      // Estado previo: revisamos alertas ACTIVAS (dedupe DB garantiza max 1 por severidad)
+      const active = await manager.getRepository(Alert).find({
+        where: { sensorId: String(sensorId), status: 'active' as any },
+        order: { triggeredAt: 'DESC' },
+        take: 5,
+      });
+
+      const hasCriticalActive = active.some((a) => String(a.severity).toLowerCase() === 'critical');
+      const hasWarningActive = active.some((a) => String(a.severity).toLowerCase() === 'warning');
+
+      const prevState: 'normal' | 'warning' | 'alert' = hasCriticalActive
+        ? 'alert'
+        : hasWarningActive
+          ? 'warning'
+          : 'normal';
+
+      // Regla: no generar eventos si no hay cruce real.
+      if (newState === prevState) {
+        return;
+      }
+
+      // Helpers
+      const resolveSeverity = async (sev: 'critical' | 'warning') => {
+        const rows = active.filter((a) => String(a.severity).toLowerCase() === sev);
+        for (const a of rows) {
+          await manager.getRepository(Alert).update(
+            { id: a.id },
+            { status: 'resolved' as any, resolvedAt: now },
+          );
+        }
+      };
+
+      const canCreateWithCooldown = async (sev: 'critical' | 'warning') => {
+        if (cooldownSeconds <= 0) return true;
+        const last = await manager
+          .getRepository(Alert)
+          .createQueryBuilder('a')
+          .where('a.sensorId = :sensorId', { sensorId: String(sensorId) })
+          .andWhere('LOWER(a.severity) = :sev', { sev })
+          .orderBy('a.triggeredAt', 'DESC')
+          .getOne();
+        if (!last?.triggeredAt) return true;
+        const ageMs = now.getTime() - new Date(last.triggeredAt).getTime();
+        return ageMs >= cooldownSeconds * 1000;
+      };
+
+      const createAlert = async (sev: 'critical' | 'warning') => {
+        // Dedup DB: si existe activa, no creamos.
+        const alreadyActive = active.some((a) => String(a.severity).toLowerCase() === sev);
+        if (alreadyActive) return null;
+        if (!(await canCreateWithCooldown(sev))) return null;
+
+        const created = manager.getRepository(Alert).create({
+          thresholdId: null,
+          sensor,
+          sensorId: String(sensorId),
+          device: sensor.device,
+          deviceId: String(sensor.device.id),
+          severity: sev as any,
+          status: 'active' as any,
+          triggeredValue: String(numericValue),
+          triggeredAt: now,
+        });
+
+        try {
+          return await manager.getRepository(Alert).save(created);
+        } catch (e) {
+          // Si el índice UNIQUE filtrado bloquea duplicado concurrente, ignoramos.
+          return null;
+        }
+      };
+
+      // Transiciones
+      // - normal: resolver todo
+      // - warning: resolver critical, asegurar warning
+      // - alert: resolver warning, asegurar critical
+      if (newState === 'normal') {
+        await resolveSeverity('critical');
+        await resolveSeverity('warning');
+        return;
+      }
+
+      if (newState === 'warning') {
+        await resolveSeverity('critical');
+        await createAlert('warning');
+        return;
+      }
+
+      // newState === 'alert'
+      await resolveSeverity('warning');
+      const created = await createAlert('critical');
+
+      // Push solo para ALERT crítica.
+      try {
+        if (created?.id) {
+          await this.notificationsService.sendAlertNotification(String(created.id));
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('Error sending alert push notification', e);
+      }
+    });
   }
 
   async getDeviceById(id: number) {
@@ -584,6 +843,121 @@ export class MonitoringService {
         relations: ['sensor', 'sensor.device'],
       }),
     );
+  }
+
+  async getSensorThresholdProfile(sensorId: number) {
+    const sensor = await this.sensorRepo.findOne({ where: { id: String(sensorId) } });
+    if (!sensor) {
+      throw new NotFoundException('Sensor no existe');
+    }
+
+    const row = await this.thresholdProfileRepo.findOne({
+      where: { sensorId: String(sensorId) },
+    });
+
+    if (!row) {
+      return {
+        sensorId: String(sensorId),
+        warningMin: null,
+        warningMax: null,
+        alertMin: null,
+        alertMax: null,
+        cooldownSeconds: 300,
+        updatedAt: null,
+      };
+    }
+
+    return {
+      sensorId: String(sensorId),
+      warningMin: row.warningMin ?? null,
+      warningMax: row.warningMax ?? null,
+      alertMin: row.alertMin ?? null,
+      alertMax: row.alertMax ?? null,
+      cooldownSeconds: Number(row.cooldownSeconds ?? 300),
+      updatedAt: row.updatedAt ?? null,
+    };
+  }
+
+  async upsertSensorThresholdProfile(
+    sensorId: number,
+    body: {
+      warningMin?: unknown;
+      warningMax?: unknown;
+      alertMin?: unknown;
+      alertMax?: unknown;
+      cooldownSeconds?: unknown;
+    },
+  ) {
+    const sensor = await this.sensorRepo.findOne({ where: { id: String(sensorId) } });
+    if (!sensor) {
+      throw new NotFoundException('Sensor no existe');
+    }
+
+    const warningMin = body.warningMin === undefined ? undefined : this.normalizeNullableNumberString(body.warningMin);
+    const warningMax = body.warningMax === undefined ? undefined : this.normalizeNullableNumberString(body.warningMax);
+    const alertMin = body.alertMin === undefined ? undefined : this.normalizeNullableNumberString(body.alertMin);
+    const alertMax = body.alertMax === undefined ? undefined : this.normalizeNullableNumberString(body.alertMax);
+
+    const cooldownSecondsRaw = body.cooldownSeconds;
+    const cooldownSeconds =
+      cooldownSecondsRaw === undefined || cooldownSecondsRaw === null || String(cooldownSecondsRaw).trim() === ''
+        ? undefined
+        : Math.max(0, Math.floor(Number(cooldownSecondsRaw)));
+    if (cooldownSeconds !== undefined && !Number.isFinite(cooldownSeconds)) {
+      throw new BadRequestException('cooldownSeconds inválido');
+    }
+
+    const existing = await this.thresholdProfileRepo.findOne({
+      where: { sensorId: String(sensorId) },
+    });
+
+    const nextWarningMin = warningMin === undefined ? existing?.warningMin ?? null : warningMin;
+    const nextWarningMax = warningMax === undefined ? existing?.warningMax ?? null : warningMax;
+    const nextAlertMin = alertMin === undefined ? existing?.alertMin ?? null : alertMin;
+    const nextAlertMax = alertMax === undefined ? existing?.alertMax ?? null : alertMax;
+
+    this.validateMinMaxPair('WARNING', nextWarningMin, nextWarningMax);
+    this.validateMinMaxPair('ALERT', nextAlertMin, nextAlertMax);
+
+    // Regla mínima de integridad: el rango ALERT debería ser igual o más estricto que WARNING.
+    // (No bloquea casos con nulls.)
+    if (nextWarningMin !== null && nextAlertMin !== null) {
+      if (Number(nextAlertMin) > Number(nextWarningMin)) {
+        throw new BadRequestException('alert_min no puede ser mayor que warning_min');
+      }
+    }
+    if (nextWarningMax !== null && nextAlertMax !== null) {
+      if (Number(nextAlertMax) < Number(nextWarningMax)) {
+        throw new BadRequestException('alert_max no puede ser menor que warning_max');
+      }
+    }
+
+    const row = existing
+      ? existing
+      : this.thresholdProfileRepo.create({
+          sensorId: String(sensorId),
+          sensor,
+          cooldownSeconds: 300,
+          updatedAt: null,
+        });
+
+    row.warningMin = nextWarningMin;
+    row.warningMax = nextWarningMax;
+    row.alertMin = nextAlertMin;
+    row.alertMax = nextAlertMax;
+    if (cooldownSeconds !== undefined) row.cooldownSeconds = cooldownSeconds;
+    row.updatedAt = new Date();
+
+    const saved = await this.thresholdProfileRepo.save(row);
+    return {
+      sensorId: String(sensorId),
+      warningMin: saved.warningMin ?? null,
+      warningMax: saved.warningMax ?? null,
+      alertMin: saved.alertMin ?? null,
+      alertMax: saved.alertMax ?? null,
+      cooldownSeconds: Number(saved.cooldownSeconds ?? 300),
+      updatedAt: saved.updatedAt ?? null,
+    };
   }
 
   /**

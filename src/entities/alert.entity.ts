@@ -9,11 +9,11 @@ export class Alert {
   @PrimaryGeneratedColumn('increment', { type: 'bigint' })
   id!: string;
 
-  @ManyToOne(() => AlertThreshold, (t) => t.alerts, { nullable: false })
-  threshold!: AlertThreshold;
+  @ManyToOne(() => AlertThreshold, (t) => t.alerts, { nullable: true })
+  threshold?: AlertThreshold | null;
 
-  @Column({ name: 'threshold_id', type: 'bigint' })
-  thresholdId!: string;
+  @Column({ name: 'threshold_id', type: 'bigint', nullable: true })
+  thresholdId?: string | null;
 
   @ManyToOne(() => Sensor, (s) => s.alerts, { nullable: false })
   sensor!: Sensor;

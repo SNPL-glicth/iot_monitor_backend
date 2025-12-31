@@ -7,6 +7,7 @@ import { Sensor } from './entities/sensor.entity';
 import { SensorReading } from './entities/sensor-reading.entity';
 import { Alert } from './entities/alert.entity';
 import { AlertThreshold } from './entities/alert-threshold.entity';
+import { SensorThresholdProfile } from './entities/sensor-threshold-profile.entity';
 import { User } from './entities/user.entity';
 import { UserDevice } from './entities/user-device.entity';
 import { DeviceLocation } from './entities/device-location.entity';
@@ -56,6 +57,7 @@ import { IntelligenceModule } from './intelligence/intelligence.module';
         SensorReading,
         Alert,
         AlertThreshold,
+        SensorThresholdProfile,
         User,
         UserDevice,
         DeviceLocation,
