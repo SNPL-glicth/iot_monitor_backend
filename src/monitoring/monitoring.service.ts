@@ -434,7 +434,10 @@ export class MonitoringService {
     const parsed = this.parseWindowToMs(window);
     const now = new Date();
     const start = new Date(now.getTime() - parsed.pastMs);
-    const end = new Date(now.getTime() + parsed.futureMs);
+    // Lecturas: estrictamente pasado hasta NOW.
+    const endReadings = now;
+    // Predicciones: pasado+futuro para ver target_timestamp hacia adelante.
+    const endPredictions = new Date(now.getTime() + parsed.futureMs);
 
     return this.withReadUncommittedRetry(async (manager) => {
       const sensor = await manager.getRepository(Sensor).findOne({ where: { id: String(sensorId) } });
@@ -459,7 +462,7 @@ export class MonitoringService {
         ) x
         ORDER BY x.ts ASC
         `,
-        [sensorId, start, maxPoints, end],
+        [sensorId, start, maxPoints, endReadings],
       );
 
       const predsRaw = await manager.query(
@@ -474,7 +477,7 @@ export class MonitoringService {
           AND target_timestamp <= @3
         ORDER BY target_timestamp ASC
         `,
-        [sensorId, start, maxPoints, end],
+        [sensorId, start, maxPoints, endPredictions],
       );
 
       // Eventos: ALERT/WARNING por threshold (tabla alerts) + WARNING delta spike (ml_events)
@@ -490,7 +493,7 @@ export class MonitoringService {
           AND triggered_at <= @2
         ORDER BY triggered_at ASC
         `,
-        [sensorId, start, end],
+        [sensorId, start, endReadings],
       );
 
       const mlRaw = await manager.query(
@@ -506,7 +509,7 @@ export class MonitoringService {
           AND event_code = 'DELTA_SPIKE'
         ORDER BY created_at ASC
         `,
-        [sensorId, start, end],
+        [sensorId, start, endReadings],
       );
 
       // Límite defensivo de eventos ML en la ventana:
@@ -611,13 +614,14 @@ export class MonitoringService {
 
       const trimmed = this.clampSeriesToMaxPoints(seriesAll, maxPoints);
 
-      const allValues: number[] = [];
+      // Rango estrictamente basado en lecturas reales: evita que predicciones
+      // “aplasten” el gráfico y se pierdan caídas/subidas reales.
+      const readingValues: number[] = [];
       for (const p of trimmed) {
-        if (typeof p.value === 'number' && Number.isFinite(p.value)) allValues.push(p.value);
-        if (typeof p.prediction === 'number' && Number.isFinite(p.prediction)) allValues.push(p.prediction);
+        if (typeof p.value === 'number' && Number.isFinite(p.value)) readingValues.push(p.value);
       }
-      const rangeMin = allValues.length ? Math.min(...allValues) : null;
-      const rangeMax = allValues.length ? Math.max(...allValues) : null;
+      const rangeMin = readingValues.length ? Math.min(...readingValues) : null;
+      const rangeMax = readingValues.length ? Math.max(...readingValues) : null;
 
       const fluctuation =
         typeof rangeMin === 'number' && typeof rangeMax === 'number' ? Number((rangeMax - rangeMin).toFixed(6)) : null;
