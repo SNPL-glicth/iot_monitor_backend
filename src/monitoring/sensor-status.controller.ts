@@ -1,4 +1,4 @@
-import { Controller, Get, Param, ParseIntPipe, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, ParseIntPipe, Query, UseGuards } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from '../auth/roles.decorator';
 import { RolesGuard } from '../auth/roles.guard';
@@ -15,5 +15,14 @@ export class SensorStatusController {
   @Roles('admin', 'operator', 'viewer')
   getSensorStatus(@Param('sensorId', ParseIntPipe) sensorId: number) {
     return this.monitoringService.getSensorConsolidatedStatus(sensorId);
+  }
+
+  @Get(':sensorId/metrics')
+  @Roles('admin', 'operator', 'viewer')
+  getSensorMetrics(
+    @Param('sensorId', ParseIntPipe) sensorId: number,
+    @Query('window') window = '1h',
+  ) {
+    return this.monitoringService.getSensorMetrics(sensorId, window);
   }
 }

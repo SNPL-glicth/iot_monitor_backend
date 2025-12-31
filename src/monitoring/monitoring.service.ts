@@ -202,6 +202,35 @@ export class MonitoringService {
     return 'unknown';
   }
 
+  private parseWindowToMs(window: string): { key: string; pastMs: number; futureMs: number } {
+    const w = String(window ?? '').trim().toLowerCase();
+    // Ventanas simples: 1h, 6h, 24h, 7d
+    const hour = 60 * 60 * 1000;
+    const day = 24 * hour;
+    const map: Record<string, number> = {
+      '1h': hour,
+      '6h': 6 * hour,
+      '24h': 24 * hour,
+      '7d': 7 * day,
+    };
+    const base = map[w] ?? hour;
+    // Por defecto mostramos pasado + futuro (para ver predicciones a futuro)
+    return { key: map[w] ? w : '1h', pastMs: base, futureMs: base };
+  }
+
+  private toIso(value: Date | string | null): string | null {
+    if (!value) return null;
+    const d = typeof value === 'string' ? new Date(value) : value;
+    const t = d.getTime();
+    if (!Number.isFinite(t)) return null;
+    return d.toISOString();
+  }
+
+  private clampSeriesToMaxPoints<T>(items: T[], maxPoints: number): T[] {
+    if (items.length <= maxPoints) return items;
+    return items.slice(items.length - maxPoints);
+  }
+
   async getSensorConsolidatedStatus(sensorId: number) {
     return this.withReadUncommittedRetry(async (manager) => {
       const sensor = await manager.getRepository(Sensor).findOne({
@@ -390,6 +419,241 @@ export class MonitoringService {
         alert_active,
         warning_active: warning_items,
         prediction_current,
+      };
+    });
+  }
+
+  /**
+   * Devuelve métricas consolidadas para "Detalles de Sensor":
+   * - lecturas reales
+   * - predicciones ML
+   * - marcas WARNING/ALERT
+   * - rango min/max (para auto-scale en frontend)
+   */
+  async getSensorMetrics(sensorId: number, window = '1h') {
+    const parsed = this.parseWindowToMs(window);
+    const now = new Date();
+    const start = new Date(now.getTime() - parsed.pastMs);
+    const end = new Date(now.getTime() + parsed.futureMs);
+
+    return this.withReadUncommittedRetry(async (manager) => {
+      const sensor = await manager.getRepository(Sensor).findOne({ where: { id: String(sensorId) } });
+      if (!sensor) throw new NotFoundException('Sensor no existe');
+
+      // Traemos una ventana fija de puntos para evitar respuestas enormes.
+      const maxPoints = 90;
+
+      // Últimas N lecturas dentro de la ventana (y luego re-ordenadas ASC para graficar)
+      const readingsRaw = await manager.query(
+        `
+        SELECT * FROM (
+          SELECT TOP (@2)
+            sensor_id AS sensorId,
+            value     AS value,
+            timestamp AS ts
+          FROM dbo.sensor_readings WITH (NOLOCK)
+          WHERE sensor_id = @0
+            AND timestamp >= @1
+            AND timestamp <= @3
+          ORDER BY timestamp DESC
+        ) x
+        ORDER BY x.ts ASC
+        `,
+        [sensorId, start, maxPoints, end],
+      );
+
+      const predsRaw = await manager.query(
+        `
+        SELECT TOP (@2)
+          sensor_id        AS sensorId,
+          predicted_value  AS predictedValue,
+          target_timestamp AS ts
+        FROM dbo.predictions WITH (NOLOCK)
+        WHERE sensor_id = @0
+          AND target_timestamp >= @1
+          AND target_timestamp <= @3
+        ORDER BY target_timestamp ASC
+        `,
+        [sensorId, start, maxPoints, end],
+      );
+
+      // Eventos: ALERT/WARNING por threshold (tabla alerts) + WARNING delta spike (ml_events)
+      const alertsRaw = await manager.query(
+        `
+        SELECT TOP 20
+          severity,
+          status,
+          triggered_at AS ts
+        FROM dbo.alerts WITH (NOLOCK)
+        WHERE sensor_id = @0
+          AND triggered_at >= @1
+          AND triggered_at <= @2
+        ORDER BY triggered_at ASC
+        `,
+        [sensorId, start, end],
+      );
+
+      const mlRaw = await manager.query(
+        `
+        SELECT TOP 20
+          event_code AS eventCode,
+          status,
+          created_at AS ts
+        FROM dbo.ml_events WITH (NOLOCK)
+        WHERE sensor_id = @0
+          AND created_at >= @1
+          AND created_at <= @2
+          AND event_code = 'DELTA_SPIKE'
+        ORDER BY created_at ASC
+        `,
+        [sensorId, start, end],
+      );
+
+      // Límite defensivo de eventos ML en la ventana:
+      // - cooldown por sensor (segundos)
+      // - máximo de eventos por ventana
+      // Nota: esto controla la respuesta del API; el control definitivo debería aplicarse
+      // también en el productor de ml_events.
+      const mlCooldownSeconds = Math.max(60, Number(process.env.ML_EVENT_COOLDOWN_SECONDS ?? '900') || 900);
+      const mlMaxPerWindow = Math.max(1, Number(process.env.ML_EVENT_MAX_PER_WINDOW ?? '6') || 6);
+
+      const mlFiltered: any[] = [];
+      let lastAcceptedAt = 0;
+      for (const e of mlRaw ?? []) {
+        if (mlFiltered.length >= mlMaxPerWindow) break;
+        const ts = new Date(e.ts);
+        const t = ts.getTime();
+        if (!Number.isFinite(t)) continue;
+        if (!lastAcceptedAt || t - lastAcceptedAt >= mlCooldownSeconds * 1000) {
+          mlFiltered.push(e);
+          lastAcceptedAt = t;
+        }
+      }
+
+      type Pt = {
+        ts: Date;
+        value: number | null;
+        prediction: number | null;
+        event: 'WARNING' | 'ALERT' | null;
+      };
+
+      // Unimos timestamps de lecturas + predicciones en una sola serie.
+      // Flutter solo dibuja; aquí se arma el dataset ya consolidado.
+      const byIso = new Map<string, Pt>();
+
+      for (const r of readingsRaw ?? []) {
+        const ts = new Date(r.ts);
+        const iso = this.toIso(ts);
+        if (!iso) continue;
+        const existing = byIso.get(iso);
+        const v = this.parseOptionalNumber(r.value);
+        if (existing) {
+          existing.value = v;
+        } else {
+          byIso.set(iso, { ts, value: v, prediction: null, event: null });
+        }
+      }
+
+      for (const p of predsRaw ?? []) {
+        const ts = new Date(p.ts);
+        const iso = this.toIso(ts);
+        if (!iso) continue;
+        const pv = this.parseOptionalNumber(p.predictedValue);
+        const existing = byIso.get(iso);
+        if (existing) {
+          existing.prediction = pv;
+        } else {
+          byIso.set(iso, { ts, value: null, prediction: pv, event: null });
+        }
+      }
+
+      const seriesAll = Array.from(byIso.values()).filter((x) => Number.isFinite(x.ts.getTime()));
+      seriesAll.sort((a, b) => a.ts.getTime() - b.ts.getTime());
+
+      // Marcar eventos en el punto más cercano (±5 minutos) dentro de la serie consolidada.
+      const markNearest = (eventTs: Date, kind: 'WARNING' | 'ALERT') => {
+        if (seriesAll.length === 0) return;
+        const target = eventTs.getTime();
+        let bestIdx = -1;
+        let bestDist = Number.POSITIVE_INFINITY;
+        for (let i = 0; i < seriesAll.length; i++) {
+          const d = Math.abs(seriesAll[i].ts.getTime() - target);
+          if (d < bestDist) {
+            bestDist = d;
+            bestIdx = i;
+          }
+        }
+        if (bestIdx < 0) return;
+        if (bestDist > 5 * 60 * 1000) return;
+        // ALERT tiene prioridad sobre WARNING
+        if (kind === 'ALERT') {
+          seriesAll[bestIdx].event = 'ALERT';
+        } else {
+          if (seriesAll[bestIdx].event !== 'ALERT') {
+            seriesAll[bestIdx].event = 'WARNING';
+          }
+        }
+      };
+
+      for (const a of alertsRaw ?? []) {
+        const ts = new Date(a.ts);
+        if (!Number.isFinite(ts.getTime())) continue;
+        const sev = String(a.severity ?? '').toLowerCase();
+        const kind: 'WARNING' | 'ALERT' = sev === 'critical' ? 'ALERT' : 'WARNING';
+        markNearest(ts, kind);
+      }
+
+      for (const e of mlFiltered ?? []) {
+        const ts = new Date(e.ts);
+        if (!Number.isFinite(ts.getTime())) continue;
+        markNearest(ts, 'WARNING');
+      }
+
+      const trimmed = this.clampSeriesToMaxPoints(seriesAll, maxPoints);
+
+      const allValues: number[] = [];
+      for (const p of trimmed) {
+        if (typeof p.value === 'number' && Number.isFinite(p.value)) allValues.push(p.value);
+        if (typeof p.prediction === 'number' && Number.isFinite(p.prediction)) allValues.push(p.prediction);
+      }
+      const rangeMin = allValues.length ? Math.min(...allValues) : null;
+      const rangeMax = allValues.length ? Math.max(...allValues) : null;
+
+      const fluctuation =
+        typeof rangeMin === 'number' && typeof rangeMax === 'number' ? Number((rangeMax - rangeMin).toFixed(6)) : null;
+
+      let alertsCount = 0;
+      let warningsCount = 0;
+
+      for (const a of alertsRaw ?? []) {
+        const sev = String(a.severity ?? '').toLowerCase();
+        if (sev === 'critical') alertsCount += 1;
+        else warningsCount += 1;
+      }
+
+      // ML DELTA_SPIKE se considera WARNING (aplicando límite/cooldown)
+      warningsCount += (mlFiltered ?? []).length;
+
+      return {
+        sensorId: String(sensorId),
+        sensorName: sensor.name,
+        unit: sensor.unit,
+        window: parsed.key,
+        range: {
+          min: rangeMin,
+          max: rangeMax,
+        },
+        fluctuation,
+        events: {
+          alerts: alertsCount,
+          warnings: warningsCount,
+        },
+        series: trimmed.map((p) => ({
+          timestamp: this.toIso(p.ts),
+          value: p.value,
+          prediction: p.prediction,
+          event: p.event,
+        })),
       };
     });
   }
