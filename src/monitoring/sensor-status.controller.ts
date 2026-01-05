@@ -25,4 +25,19 @@ export class SensorStatusController {
   ) {
     return this.monitoringService.getSensorMetrics(sensorId, window);
   }
+
+  @Get(':sensorId/thresholds-canonical')
+  @Roles('admin', 'operator', 'viewer')
+  getSensorThresholdsCanonical(@Param('sensorId', ParseIntPipe) sensorId: number) {
+    return this.monitoringService.getSensorThresholdsCanonical(sensorId);
+  }
+
+  @Get(':sensorId/dashboard')
+  @Roles('admin', 'operator', 'viewer')
+  getSensorDashboard(
+    @Param('sensorId', ParseIntPipe) sensorId: number,
+    @Query('range') range = '6h',
+  ) {
+    return this.monitoringService.getSensorDashboard(sensorId, range);
+  }
 }

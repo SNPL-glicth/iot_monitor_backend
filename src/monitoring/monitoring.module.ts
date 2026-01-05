@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
+import { HttpModule } from '@nestjs/axios';
 import { MonitoringController } from './monitoring.controller';
 import { MonitoringService } from './monitoring.service';
 import { SensorStatusController } from './sensor-status.controller';
@@ -22,6 +23,7 @@ import {
 
 @Module({
   imports: [
+    HttpModule,
     NotificationsModule,
     TypeOrmModule.forFeature([
       Device,

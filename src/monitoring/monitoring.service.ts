@@ -4,7 +4,9 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { HttpService } from '@nestjs/axios';
 import { InjectRepository } from '@nestjs/typeorm';
+import { firstValueFrom } from 'rxjs';
 import { DataSource, EntityManager, Repository } from 'typeorm';
 import { Device } from '../entities/device.entity';
 import { Sensor } from '../entities/sensor.entity';
@@ -55,7 +57,46 @@ export class MonitoringService {
     private readonly predictionRepo: Repository<Prediction>,
     private readonly dataSource: DataSource,
     private readonly notificationsService: NotificationsService,
+    private readonly http: HttpService,
   ) {}
+
+  private readonly telemetryBaseUrl = (process.env.TELEMETRY_IOT_URL || 'http://localhost:8099').replace(/\/$/, '');
+
+  private async getTelemetry<T>(path: string, params?: Record<string, any>): Promise<T> {
+    const url = `${this.telemetryBaseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
+    const res$ = this.http.get(url, { params });
+    const res: any = await firstValueFrom(res$);
+    return res.data as T;
+  }
+
+  async getSensorThresholdsCanonical(sensorId: number) {
+    const metrics = await this.getTelemetry<any>(`/telemetry/sensors/${sensorId}/metrics`);
+    return {
+      sensorId: String(sensorId),
+      thresholds: metrics?.thresholds ?? { warning: { min: null, max: null }, alert: { min: null, max: null } },
+    };
+  }
+
+  async getSensorDashboard(sensorId: number, range = '6h') {
+    const [metrics, trading, active] = await Promise.all([
+      this.getTelemetry<any>(`/telemetry/sensors/${sensorId}/metrics`),
+      this.getTelemetry<any>(`/telemetry/sensors/${sensorId}/trading`, { range }),
+      this.alertRepo.find({ where: { sensorId: String(sensorId), status: 'active' as any } }),
+    ]);
+
+    const activeCritical = active.filter((a) => String(a.severity).toLowerCase() === 'critical').length;
+    const activeWarning = active.filter((a) => String(a.severity).toLowerCase() === 'warning').length;
+
+    return {
+      sensorId: String(sensorId),
+      metrics,
+      trading,
+      alerts: {
+        activeCritical,
+        activeWarning,
+      },
+    };
+  }
 
   private normalizeNullableNumberString(v: unknown): string | null {
     if (v === null || v === undefined) return null;
