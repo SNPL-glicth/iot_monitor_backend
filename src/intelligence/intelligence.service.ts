@@ -31,6 +31,27 @@ function mapEventTypeToSeverity(eventType: string | null): IntelligenceSeverity 
   return 'info';
 }
 
+function normalizePredictionSeverity(args: {
+  severityRaw: string | null | undefined;
+  isAnomaly: boolean;
+  anomalyScore: number | null;
+  riskLevel: string | null | undefined;
+}): IntelligenceSeverity {
+  const sevLower = String(args.severityRaw ?? 'info').toLowerCase();
+  const base: IntelligenceSeverity =
+    sevLower === 'critical' || sevLower === 'warning' ? (sevLower as any) : 'info';
+
+  const risk = String(args.riskLevel ?? 'NONE').toUpperCase().trim();
+  const anomalyScore = args.anomalyScore ?? 0;
+  const hasAnomalySignal = Boolean(args.isAnomaly) || anomalyScore > 0;
+
+  if (base === 'critical' && !hasAnomalySignal && risk === 'NONE') {
+    return 'warning';
+  }
+
+  return base;
+}
+
 @Injectable()
 export class IntelligenceService {
   constructor(
@@ -67,14 +88,15 @@ export class IntelligenceService {
       dto.unit = p.sensor?.unit ?? null;
       dto.horizonMinutes = p.horizonMinutes ?? 10;
       dto.trend = (p.trend as string) ?? 'stable';
-
-      // Severidad y riesgo vienen ya calculados desde ML (contrato fuerte).
-      const sevRaw = (p.severity as string | null) ?? 'info';
-      const sevLower = sevRaw.toLowerCase();
-      dto.severity = (sevLower === 'critical' || sevLower === 'warning' ? sevLower : 'info') as any;
       dto.riskLevel = (p.riskLevel as string | null) ?? 'NONE';
       dto.isAnomaly = Boolean(p.isAnomaly && Number(p.isAnomaly) !== 0);
       dto.anomalyScore = p.anomalyScore !== null && p.anomalyScore !== undefined ? Number(p.anomalyScore) : null;
+      dto.severity = normalizePredictionSeverity({
+        severityRaw: (p.severity as string | null) ?? 'info',
+        isAnomaly: dto.isAnomaly,
+        anomalyScore: dto.anomalyScore,
+        riskLevel: dto.riskLevel,
+      });
       dto.status = (p.status as string | null) ?? 'active';
 
       const explanationRaw = p.explanation ?? '';
