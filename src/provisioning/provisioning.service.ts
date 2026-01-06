@@ -13,6 +13,8 @@ import {
   RotateApiKeyResponseDto,
   ProvisionDeviceDto,
   ProvisionDeviceResponseDto,
+  ActivateDeviceDto,
+  ActivateDeviceResponseDto,
 } from './provisioning.dto';
 
 @Injectable()
@@ -126,8 +128,21 @@ export class ProvisioningService {
   }
 
   /**
+   * Genera un código de provisioning único (formato: XXXX-XXXX-XXX)
+   */
+  private generateProvisioningCode(): string {
+    const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+    const part1 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    const part2 = Array.from({ length: 4 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    const part3 = Array.from({ length: 3 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+    return `${part1}-${part2}-${part3}`;
+  }
+
+  /**
    * Provisiona un dispositivo (para Flutter - NO retorna API key)
-   * La API key se genera y almacena, pero solo se muestra en el QR
+   * Flutter envía: name, model, provisioning_code
+   * Backend valida código, crea dispositivo, genera API key (no la devuelve)
+   * Dispositivo queda en PENDING_ACTIVATION hasta que firmware active
    */
   async provisionDevice(dto: ProvisionDeviceDto): Promise<ProvisionDeviceResponseDto> {
     const queryRunner = this.dataSource.createQueryRunner();
@@ -135,49 +150,138 @@ export class ProvisioningService {
     await queryRunner.startTransaction();
 
     try {
-      // 1. Crear el dispositivo
+      // 1. Generar código de provisioning si no se proporciona
+      const provisioningCode = dto.provisioningCode || this.generateProvisioningCode();
+
+      // 2. Validar que el provisioning_code no esté usado
+      if (dto.provisioningCode) {
+        const existingDevice = await queryRunner.manager.findOne(Device, {
+          where: { provisioningCode: dto.provisioningCode },
+        });
+
+        if (existingDevice) {
+          throw new BadRequestException('Este código de provisioning ya fue utilizado');
+        }
+      }
+
+      // 3. Crear el dispositivo en estado PENDING_ACTIVATION
       const device = queryRunner.manager.create(Device, {
         name: dto.name,
-        deviceType: dto.deviceType,
-        status: 'offline',
+        deviceType: dto.model || 'generic',
+        status: 'pending_activation',
+        provisioningCode: provisioningCode,
         metadata: dto.metadata || null,
       });
       
       const savedDevice = await queryRunner.manager.save(Device, device);
 
-      // 2. Generar API key
+      // 3. Generar API key pero NO devolverla a Flutter
       const apiKey = this.generateApiKey();
       const apiKeyHash = this.hashApiKey(apiKey);
 
-      // 3. Guardar API key hasheada
+      // 4. Guardar API key hasheada (pendiente de activación)
       const deviceApiKey = queryRunner.manager.create(DeviceApiKey, {
         deviceId: savedDevice.id,
         apiKeyHash: apiKeyHash,
         keyName: 'Primary Key',
-        isActive: true,
+        isActive: false, // Se activa cuando el firmware llame a /activate
       });
       
       await queryRunner.manager.save(DeviceApiKey, deviceApiKey);
 
       await queryRunner.commitTransaction();
 
-      // 4. Generar datos para QR (JSON con device_uuid y api_key)
-      const qrData = JSON.stringify({
-        device_uuid: savedDevice.deviceUuid,
-        api_key: apiKey,
-        ingest_url: process.env.INGEST_URL || 'http://localhost:8000/ingest/packets',
-      });
-
+      // Flutter NO recibe la API key
       return {
-        deviceUuid: savedDevice.deviceUuid,
         deviceId: savedDevice.id,
-        qrData: qrData,
-        message: 'Dispositivo provisionado. Escanee el QR con el dispositivo físico.',
+        deviceUuid: savedDevice.deviceUuid,
+        status: 'PENDING_ACTIVATION',
+        message: 'Dispositivo registrado. Esperando activación del firmware.',
       };
     } catch (error) {
       await queryRunner.rollbackTransaction();
+      if (error instanceof BadRequestException) throw error;
       throw new BadRequestException(
         `Error al provisionar dispositivo: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
+   * Activa un dispositivo (llamado por el FIRMWARE, no por Flutter)
+   * Firmware envía: provisioning_code, firmware_version
+   * Backend retorna: device_uuid, api_key, ingest_url, sensors
+   */
+  async activateDevice(dto: ActivateDeviceDto): Promise<ActivateDeviceResponseDto> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      // 1. Buscar dispositivo por provisioning_code
+      const device = await queryRunner.manager.findOne(Device, {
+        where: { provisioningCode: dto.provisioningCode },
+        relations: ['sensors'],
+      });
+
+      if (!device) {
+        throw new NotFoundException('Código de provisioning no encontrado');
+      }
+
+      if (device.status === 'online' || device.status === 'offline') {
+        throw new BadRequestException('Este dispositivo ya fue activado anteriormente');
+      }
+
+      // 2. Buscar la API key pendiente
+      const apiKeyRecord = await queryRunner.manager.findOne(DeviceApiKey, {
+        where: { deviceId: device.id, isActive: false },
+      });
+
+      if (!apiKeyRecord) {
+        throw new BadRequestException('No hay API key pendiente para este dispositivo');
+      }
+
+      // 3. Generar nueva API key para el firmware (la anterior era solo placeholder)
+      const newApiKey = this.generateApiKey();
+      const newApiKeyHash = this.hashApiKey(newApiKey);
+
+      // 4. Actualizar API key y activar
+      apiKeyRecord.apiKeyHash = newApiKeyHash;
+      apiKeyRecord.isActive = true;
+      await queryRunner.manager.save(DeviceApiKey, apiKeyRecord);
+
+      // 5. Actualizar estado del dispositivo
+      device.status = 'offline'; // Esperando primera lectura
+      if (dto.firmwareVersion) {
+        device.metadata = JSON.stringify({
+          ...(device.metadata ? JSON.parse(device.metadata) : {}),
+          firmwareVersion: dto.firmwareVersion,
+          activatedAt: new Date().toISOString(),
+        });
+      }
+      await queryRunner.manager.save(Device, device);
+
+      await queryRunner.commitTransaction();
+
+      // 6. Retornar datos al firmware (INCLUYE API KEY)
+      return {
+        deviceUuid: device.deviceUuid,
+        deviceApiKey: newApiKey,
+        ingestUrl: process.env.INGEST_URL || 'http://localhost:8000/ingest/packets',
+        sensors: (device.sensors || []).map(s => ({
+          sensorUuid: s.sensorUuid,
+          sensorType: s.sensorType,
+          name: s.name,
+          unit: s.unit,
+        })),
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      if (error instanceof NotFoundException || error instanceof BadRequestException) throw error;
+      throw new BadRequestException(
+        `Error al activar dispositivo: ${error instanceof Error ? error.message : 'Unknown error'}`,
       );
     } finally {
       await queryRunner.release();

@@ -91,9 +91,13 @@ export class ProvisionDeviceDto {
   @IsNotEmpty()
   name!: string;
 
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  deviceType!: string;
+  model?: string;
+
+  @IsOptional()
+  @IsString()
+  provisioningCode?: string;
 
   @IsOptional()
   @IsString()
@@ -101,10 +105,32 @@ export class ProvisionDeviceDto {
 }
 
 export class ProvisionDeviceResponseDto {
-  deviceUuid!: string;
   deviceId!: string;
-  qrData!: string;
+  deviceUuid!: string;
+  status!: string;
   message!: string;
+}
+
+export class ActivateDeviceDto {
+  @IsString()
+  @IsNotEmpty()
+  provisioningCode!: string;
+
+  @IsOptional()
+  @IsString()
+  firmwareVersion?: string;
+}
+
+export class ActivateDeviceResponseDto {
+  deviceUuid!: string;
+  deviceApiKey!: string;
+  ingestUrl!: string;
+  sensors!: {
+    sensorUuid: string;
+    sensorType: string;
+    name: string;
+    unit: string;
+  }[];
 }
 
 export class RotateApiKeyResponseDto {

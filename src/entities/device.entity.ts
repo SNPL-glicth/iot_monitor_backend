@@ -20,7 +20,10 @@ export class Device {
   deviceType!: string;
 
   @Column({ type: 'varchar', length: 50 })
-  status!: 'online' | 'offline' | 'maintenance' | 'error';
+  status!: 'online' | 'offline' | 'maintenance' | 'error' | 'pending_activation';
+
+  @Column({ name: 'provisioning_code', type: 'varchar', length: 20, nullable: true, unique: true })
+  provisioningCode?: string | null;
 
   @Column({ name: 'last_connection', type: 'datetime2', nullable: true })
   lastConnection?: Date | null;

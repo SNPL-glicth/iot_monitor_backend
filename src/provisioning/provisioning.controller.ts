@@ -20,6 +20,8 @@ import {
   RotateApiKeyResponseDto,
   ProvisionDeviceDto,
   ProvisionDeviceResponseDto,
+  ActivateDeviceDto,
+  ActivateDeviceResponseDto,
 } from './provisioning.dto';
 
 /**
@@ -57,11 +59,10 @@ export class ProvisioningController {
   /**
    * Provisiona un dispositivo IoT (para Flutter)
    * 
-   * - Crea el dispositivo en BD
-   * - Genera API key única
-   * - Retorna QR data (NO expone API key directamente)
+   * Flutter envía: name, model, provisioning_code (del QR de fábrica)
+   * Backend: valida código, crea dispositivo, genera API key (NO la devuelve)
    * 
-   * @returns device_uuid y qrData para escanear
+   * @returns device_id, device_uuid, status=PENDING_ACTIVATION
    */
   @Post('provision')
   @Roles('admin')
@@ -113,5 +114,30 @@ export class ProvisioningController {
     @Param('deviceUuid') deviceUuid: string,
   ): Promise<{ message: string }> {
     return this.provisioningService.revokeAllKeys(deviceUuid);
+  }
+}
+
+/**
+ * Controller para activación de dispositivos (FIRMWARE)
+ * NO requiere JWT - el firmware no tiene token de usuario
+ */
+@Controller('devices')
+export class DeviceActivationController {
+  constructor(private readonly provisioningService: ProvisioningService) {}
+
+  /**
+   * Activa un dispositivo IoT (llamado por FIRMWARE, no Flutter)
+   * 
+   * Firmware envía: provisioning_code, firmware_version
+   * Backend retorna: device_uuid, api_key, ingest_url, sensors
+   * 
+   * ⚠️ NO requiere autenticación JWT (el firmware no tiene token)
+   */
+  @Post('activate')
+  @HttpCode(HttpStatus.OK)
+  async activateDevice(
+    @Body() dto: ActivateDeviceDto,
+  ): Promise<ActivateDeviceResponseDto> {
+    return this.provisioningService.activateDevice(dto);
   }
 }

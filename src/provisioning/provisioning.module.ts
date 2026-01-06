@@ -1,6 +1,6 @@
 import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
-import { ProvisioningController } from './provisioning.controller';
+import { ProvisioningController, DeviceActivationController } from './provisioning.controller';
 import { ProvisioningService } from './provisioning.service';
 import { Device } from '../entities/device.entity';
 import { Sensor } from '../entities/sensor.entity';
@@ -10,7 +10,7 @@ import { DeviceApiKey } from '../entities/device-api-key.entity';
   imports: [
     TypeOrmModule.forFeature([Device, Sensor, DeviceApiKey]),
   ],
-  controllers: [ProvisioningController],
+  controllers: [ProvisioningController, DeviceActivationController],
   providers: [ProvisioningService],
   exports: [ProvisioningService],
 })
