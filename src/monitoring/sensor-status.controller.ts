@@ -11,6 +11,13 @@ import { MonitoringService } from './monitoring.service';
 export class SensorStatusController {
   constructor(private readonly monitoringService: MonitoringService) {}
 
+  // Perf 2.1: Endpoint batch para eliminar N+1 queries en Flutter
+  @Get('status/batch')
+  @Roles('admin', 'operator', 'viewer')
+  async getSensorStatusBatch(@Query('ids') idsRaw: string) {
+    return this.monitoringService.getSensorConsolidatedStatusBatch(idsRaw);
+  }
+
   @Get(':sensorId/status')
   @Roles('admin', 'operator', 'viewer')
   getSensorStatus(@Param('sensorId', ParseIntPipe) sensorId: number) {

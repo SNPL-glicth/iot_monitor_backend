@@ -143,22 +143,48 @@ export class MonitoringService {
   }
 
   async getSensorDashboard(sensorId: number, range = '6h') {
-    const [metrics, trading, active] = await Promise.all([
+    // Bug 1.1: Estado consolidado debe considerar alertas activas de BD,
+    // no solo el estado instantáneo de telemetry.
+    const [metrics, trading, activeAlerts, activeMlWarnings] = await Promise.all([
       this.getTelemetry<any>(`/telemetry/sensors/${sensorId}/metrics`),
       this.getTelemetry<any>(`/telemetry/sensors/${sensorId}/trading`, { range }),
       this.alertRepo.find({ where: { sensorId: String(sensorId), status: 'active' as any } }),
+      this.mlEventActiveViewRepo.find({ where: { sensorId: String(sensorId) } }),
     ]);
 
-    const activeCritical = active.filter((a) => String(a.severity).toLowerCase() === 'critical').length;
-    const activeWarning = active.filter((a) => String(a.severity).toLowerCase() === 'warning').length;
+    const activeCritical = activeAlerts.filter((a) => String(a.severity).toLowerCase() === 'critical').length;
+    const activeWarning = activeAlerts.filter((a) => String(a.severity).toLowerCase() !== 'critical').length;
+    const hasMlWarning = activeMlWarnings.length > 0;
+
+    // Estado consolidado: ALERT activo > WARNING activo (ML o umbral) > metrics.state
+    // Prioridad: 1) Alerta crítica activa, 2) Warning activo (ML o threshold), 3) Estado instantáneo
+    let consolidatedState: 'ALERT' | 'WARNING' | 'NORMAL' = 'NORMAL';
+    if (activeCritical > 0) {
+      consolidatedState = 'ALERT';
+    } else if (activeWarning > 0 || hasMlWarning) {
+      consolidatedState = 'WARNING';
+    } else {
+      // Fallback al estado instantáneo de telemetry
+      const metricsState = String(metrics?.state ?? 'NORMAL').toUpperCase();
+      if (metricsState === 'ALERT') consolidatedState = 'ALERT';
+      else if (metricsState === 'WARNING') consolidatedState = 'WARNING';
+      else consolidatedState = 'NORMAL';
+    }
+
+    // Inyectar estado consolidado en metrics para que Flutter lo use sin recalcular
+    const metricsWithConsolidated = {
+      ...metrics,
+      state: consolidatedState,
+    };
 
     return {
       sensorId: String(sensorId),
-      metrics,
+      metrics: metricsWithConsolidated,
       trading,
       alerts: {
         activeCritical,
         activeWarning,
+        activeMlWarnings: activeMlWarnings.length,
       },
     };
   }
@@ -301,11 +327,14 @@ export class MonitoringService {
     alertActive: any | null;
     warningActive: any | null;
     predictionCurrent: any | null;
-  }): 'alert' | 'warning' | 'prediction' | 'unknown' {
+  }): 'alert' | 'warning' | 'normal' {
+    // IMPORTANTE: Las predicciones NO son un estado real.
+    // Solo ALERT y WARNING (por umbral o delta spike) son estados reales.
+    // Las predicciones son informativas y se devuelven en prediction_current,
+    // pero NO afectan el final_state.
     if (args.alertActive) return 'alert';
     if (args.warningActive) return 'warning';
-    if (args.predictionCurrent) return 'prediction';
-    return 'unknown';
+    return 'normal';
   }
 
   private parseWindowToMs(window: string): { key: string; pastMs: number; futureMs: number } {
@@ -527,6 +556,37 @@ export class MonitoringService {
         prediction_current,
       };
     });
+  }
+
+  /**
+   * Perf 2.1: Batch endpoint para obtener status consolidado de múltiples sensores.
+   * Elimina el problema N+1 donde Flutter hacía 1 request por sensor.
+   */
+  async getSensorConsolidatedStatusBatch(idsRaw: string) {
+    const ids = String(idsRaw ?? '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s !== '')
+      .map((s) => Number(s))
+      .filter((n) => Number.isFinite(n) && n > 0);
+
+    if (ids.length === 0) {
+      return { items: [] };
+    }
+
+    // Limitar a máximo 50 sensores por request para evitar abuse
+    const limitedIds = ids.slice(0, 50);
+
+    // Ejecutar en paralelo con Promise.allSettled para no fallar todo si uno falla
+    const results = await Promise.allSettled(
+      limitedIds.map((id) => this.getSensorConsolidatedStatus(id)),
+    );
+
+    const items = results
+      .filter((r): r is PromiseFulfilledResult<any> => r.status === 'fulfilled')
+      .map((r) => r.value);
+
+    return { items };
   }
 
   /**
