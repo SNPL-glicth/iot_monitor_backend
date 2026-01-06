@@ -238,4 +238,10 @@ export class MonitoringController {
     await this.monitoringService.insertSensorReading(sensorId, Number(value));
     return { success: true };
   }
+
+  @Get('debug/db')
+  @Roles('admin', 'operator', 'viewer')
+  getDbDebug(@Query('sensorId') sensorId?: string) {
+    return this.monitoringService.getDbDebug(sensorId);
+  }
 }

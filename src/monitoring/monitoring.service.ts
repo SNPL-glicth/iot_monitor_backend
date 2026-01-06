@@ -62,6 +62,71 @@ export class MonitoringService {
 
   private readonly telemetryBaseUrl = (process.env.TELEMETRY_IOT_URL || 'http://localhost:8099').replace(/\/$/, '');
 
+  async getDbDebug(sensorIdRaw?: string) {
+    const raw = String(sensorIdRaw ?? '').trim();
+    const asNum = Number(raw);
+    const sensorId = raw !== '' && Number.isFinite(asNum) ? Math.floor(asNum) : null;
+
+    const nowRow = (await this.dataSource.query(
+      `SELECT SYSDATETIME() AS now, DB_NAME() AS dbName, @@SERVERNAME AS serverName`,
+    ))?.[0];
+
+    let readings: any = null;
+    let last5: any[] = [];
+
+    if (sensorId !== null && sensorId > 0) {
+      const countRow = (await this.dataSource.query(
+        `
+        SELECT
+          COUNT(1) AS total,
+          MAX([timestamp]) AS latestTs,
+          MIN([timestamp]) AS earliestTs
+        FROM dbo.sensor_readings WITH (NOLOCK)
+        WHERE sensor_id = @0
+        `,
+        [sensorId],
+      ))?.[0];
+
+      readings = {
+        sensorId,
+        total: Number(countRow?.total ?? 0),
+        latestTs: countRow?.latestTs ?? null,
+        earliestTs: countRow?.earliestTs ?? null,
+      };
+
+      const rows = await this.dataSource.query(
+        `
+        SELECT TOP 5
+          [timestamp] AS ts,
+          CAST([value] AS float) AS value
+        FROM dbo.sensor_readings WITH (NOLOCK)
+        WHERE sensor_id = @0
+        ORDER BY [timestamp] DESC
+        `,
+        [sensorId],
+      );
+      last5 = (rows ?? []).map((r: any) => ({ ts: r?.ts ?? null, value: r?.value ?? null }));
+    }
+
+    return {
+      db: {
+        now: nowRow?.now ?? null,
+        dbName: nowRow?.dbName ?? null,
+        serverName: nowRow?.serverName ?? null,
+        config: {
+          host: process.env.DB_HOST || 'localhost',
+          port: Number(process.env.DB_PORT) || 1434,
+          database: process.env.DB_NAME || 'iot_monitoring_system',
+          user: process.env.DB_USER || 'sa',
+          encrypt: false,
+          passwordLength: String(process.env.DB_PASSWORD ?? '').length,
+        },
+      },
+      readings,
+      last5,
+    };
+  }
+
   private async getTelemetry<T>(path: string, params?: Record<string, any>): Promise<T> {
     const url = `${this.telemetryBaseUrl}${path.startsWith('/') ? '' : '/'}${path}`;
     const res$ = this.http.get(url, { params });
