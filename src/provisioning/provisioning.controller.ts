@@ -25,13 +25,13 @@ import {
 } from './provisioning.dto';
 
 /**
- * Controller para registro y provisioning de dispositivos IoT
+ * Controller para gestión de dispositivos IoT
  * 
  * FLUJO:
- * 1. Admin registra dispositivo -> POST /devices/register
- * 2. Sistema genera device_uuid + api_key única
- * 3. Admin configura api_key en el dispositivo físico
- * 4. Dispositivo envía datos a Ingest API con X-Device-Key
+ * 1. Crear dispositivo (lógico) -> POST /devices/create -> estado DRAFT
+ * 2. Agregar sensores -> POST /devices/:uuid/sensors
+ * 3. Preparar activación -> POST /devices/:uuid/prepare-activation -> estado PENDING_ACTIVATION
+ * 4. Firmware activa -> POST /devices/activate -> estado ACTIVE (recibe api_key)
  */
 @Controller('devices')
 @UseGuards(AuthGuard('jwt'), RolesGuard)
@@ -39,13 +39,38 @@ export class ProvisioningController {
   constructor(private readonly provisioningService: ProvisioningService) {}
 
   /**
-   * Registra un nuevo dispositivo IoT (uso interno/scripts)
-   * 
-   * - Crea el dispositivo en BD
-   * - Genera API key única
-   * - Opcionalmente crea sensores iniciales
-   * 
-   * @returns device_uuid y api_key (la key solo se muestra una vez)
+   * PASO 1: Crear dispositivo (lógico)
+   * - Solo requiere nombre
+   * - Estado: DRAFT
+   * - NO genera api_key
+   */
+  @Post('create')
+  @Roles('admin')
+  @HttpCode(HttpStatus.CREATED)
+  async createDevice(
+    @Body() dto: ProvisionDeviceDto,
+  ): Promise<ProvisionDeviceResponseDto> {
+    return this.provisioningService.createDevice(dto);
+  }
+
+  /**
+   * PASO 2: Preparar activación (cuando hay hardware)
+   * - Genera provisioning_code
+   * - Genera api_key (hasheada, no devuelta)
+   * - Estado: PENDING_ACTIVATION
+   * - Retorna QR data
+   */
+  @Post(':deviceUuid/prepare-activation')
+  @Roles('admin')
+  @HttpCode(HttpStatus.OK)
+  async prepareActivation(
+    @Param('deviceUuid') deviceUuid: string,
+  ): Promise<{ provisioningCode: string; qrData: string }> {
+    return this.provisioningService.prepareActivation(deviceUuid);
+  }
+
+  /**
+   * Legacy: Registra dispositivo con api_key (uso interno/scripts)
    */
   @Post('register')
   @Roles('admin')
@@ -54,23 +79,6 @@ export class ProvisioningController {
     @Body() dto: RegisterDeviceDto,
   ): Promise<RegisterDeviceResponseDto> {
     return this.provisioningService.registerDevice(dto);
-  }
-
-  /**
-   * Provisiona un dispositivo IoT (para Flutter)
-   * 
-   * Flutter envía: name, model, provisioning_code (del QR de fábrica)
-   * Backend: valida código, crea dispositivo, genera API key (NO la devuelve)
-   * 
-   * @returns device_id, device_uuid, status=PENDING_ACTIVATION
-   */
-  @Post('provision')
-  @Roles('admin')
-  @HttpCode(HttpStatus.CREATED)
-  async provisionDevice(
-    @Body() dto: ProvisionDeviceDto,
-  ): Promise<ProvisionDeviceResponseDto> {
-    return this.provisioningService.provisionDevice(dto);
   }
 
   /**
