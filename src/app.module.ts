@@ -18,6 +18,7 @@ import { AuditLog } from './entities/audit-log.entity';
 import { SystemMetric } from './entities/system-metric.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
 import { AlertNotification } from './entities/alert-notification.entity';
+import { DeviceApiKey } from './entities/device-api-key.entity';
 import {
   ActiveAlertView,
   AlertsHistoryView,
@@ -34,6 +35,7 @@ import { RealtimeModule } from './realtime/realtime.module';
 import { CrmModule } from './crm/crm.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { IntelligenceModule } from './intelligence/intelligence.module';
+import { ProvisioningModule } from './provisioning/provisioning.module';
 
 @Module({
   imports: [
@@ -68,6 +70,7 @@ import { IntelligenceModule } from './intelligence/intelligence.module';
         SystemMetric,
         RefreshToken,
         AlertNotification,
+        DeviceApiKey,
         DeviceWithSensorsView,
         ActiveAlertView,
         LatestSensorReadingView,
@@ -85,6 +88,7 @@ import { IntelligenceModule } from './intelligence/intelligence.module';
     CrmModule,
     NotificationsModule,
     IntelligenceModule,
+    ProvisioningModule,
   ],
   controllers: [AppController],
   providers: [AppService],
