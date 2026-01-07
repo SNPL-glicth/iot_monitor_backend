@@ -4,6 +4,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import {
+  SensorTelemetryState,
+  SensorFinalState,
+  evaluateTelemetryState,
+} from '../common/sensor-states';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { Device } from '../entities/device.entity';
@@ -527,7 +532,7 @@ export class MonitoringService {
         triggeredAt: this.formatDateTime(a.triggeredAt),
       })),
       thresholds,
-      status: activeAlerts.length > 0 ? 'alert' : 'normal',
+      status: activeAlerts.length > 0 ? SensorFinalState.ALERT : SensorFinalState.NORMAL,
     };
   }
 
@@ -782,6 +787,33 @@ export class MonitoringService {
   }
 
   /**
+   * INC-05: Obtiene el umbral de delta absoluto desde la tabla delta_thresholds.
+   * Retorna null si no hay umbral configurado (fallback: no detectar spikes).
+   * 
+   * @param sensorId - ID del sensor
+   * @returns Umbral absoluto de delta o null
+   */
+  private async getDeltaThresholdForSensor(sensorId: number): Promise<number | null> {
+    try {
+      const result = await this.dataSource.query(
+        `SELECT TOP 1 abs_delta 
+         FROM dbo.delta_thresholds 
+         WHERE sensor_id = @0 AND is_active = 1 
+         ORDER BY id ASC`,
+        [sensorId],
+      );
+      
+      if (result && result.length > 0 && result[0].abs_delta !== null) {
+        return Number(result[0].abs_delta);
+      }
+      return null;
+    } catch {
+      // Si la tabla no existe o hay error, retornar null (no detectar spikes)
+      return null;
+    }
+  }
+
+  /**
    * Dashboard consolidado de un sensor con lecturas y alertas.
    * Formato esperado por Flutter: { sensorId, metrics, trading, alerts }
    */
@@ -847,23 +879,14 @@ export class MonitoringService {
       },
     };
 
-    // Evaluar estado actual basado en umbrales
+    // Evaluar estado actual basado en umbrales (usando función canónica)
     const currentValue = latestReading ? Number(latestReading.value) : null;
-    let state = 'NORMAL';
-    if (currentValue !== null) {
-      const { warning, alert } = canonicalThresholds;
-      if (
-        (alert.min !== null && currentValue < alert.min) ||
-        (alert.max !== null && currentValue > alert.max)
-      ) {
-        state = 'ALERT';
-      } else if (
-        (warning.min !== null && currentValue < warning.min) ||
-        (warning.max !== null && currentValue > warning.max)
-      ) {
-        state = 'WARNING';
-      }
-    }
+    const state = evaluateTelemetryState(currentValue, {
+      warningMin: canonicalThresholds.warning.min,
+      warningMax: canonicalThresholds.warning.max,
+      alertMin: canonicalThresholds.alert.min,
+      alertMax: canonicalThresholds.alert.max,
+    });
 
     // Contar alertas activas
     const activeCritical = await this.alertRepo.count({
@@ -873,22 +896,20 @@ export class MonitoringService {
       where: { sensor: { id: String(sensorId) }, status: 'active', severity: 'warning' },
     });
 
+    // Obtener umbral de delta desde BD (INC-05: evitar hardcoded)
+    const deltaThreshold = await this.getDeltaThresholdForSensor(sensorId);
+
     // Construir series para trading chart
     const series = readings.map((r, idx) => {
       const value = Number(r.value);
-      let pointState = 'NORMAL';
-      const { warning, alert } = canonicalThresholds;
-      if (
-        (alert.min !== null && value < alert.min) ||
-        (alert.max !== null && value > alert.max)
-      ) {
-        pointState = 'ALERT';
-      } else if (
-        (warning.min !== null && value < warning.min) ||
-        (warning.max !== null && value > warning.max)
-      ) {
-        pointState = 'WARNING';
-      }
+      
+      // Usar función canónica para evaluar estado (INC-01/INC-03)
+      const pointState = evaluateTelemetryState(value, {
+        warningMin: canonicalThresholds.warning.min,
+        warningMax: canonicalThresholds.warning.max,
+        alertMin: canonicalThresholds.alert.min,
+        alertMax: canonicalThresholds.alert.max,
+      });
 
       // Calcular delta respecto al punto anterior
       let delta: number | null = null;
@@ -897,8 +918,9 @@ export class MonitoringService {
         delta = value - prevValue;
       }
 
+      // INC-05: Usar umbral de delta desde BD en lugar de hardcoded
       const events: string[] = [];
-      if (delta !== null && Math.abs(delta) > 5) {
+      if (delta !== null && deltaThreshold !== null && Math.abs(delta) >= deltaThreshold) {
         events.push('DELTA_SPIKE');
       }
 

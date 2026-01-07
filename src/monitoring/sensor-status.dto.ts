@@ -1,9 +1,18 @@
-export enum SensorFinalState {
-  ALERT = 'alert',
-  WARNING = 'warning',
-  PREDICTION = 'prediction',
-  UNKNOWN = 'unknown',
-}
+import { SensorFinalState as CanonicalSensorFinalState } from '../common/sensor-states';
+
+/**
+ * Estados finales del sensor.
+ * Re-exportamos desde las constantes canónicas para mantener compatibilidad.
+ */
+export const SensorFinalState = {
+  ALERT: CanonicalSensorFinalState.ALERT,
+  WARNING: CanonicalSensorFinalState.WARNING,
+  PREDICTION: CanonicalSensorFinalState.PREDICTION,
+  NORMAL: CanonicalSensorFinalState.NORMAL,
+  UNKNOWN: CanonicalSensorFinalState.UNKNOWN,
+} as const;
+
+export type SensorFinalStateType = typeof SensorFinalState[keyof typeof SensorFinalState];
 
 export type ActiveAlert = {
   id: number;
@@ -41,7 +50,7 @@ export type CurrentPrediction = {
 
 export type SensorConsolidatedStatus = {
   sensor_id: number;
-  final_state: SensorFinalState;
+  final_state: SensorFinalStateType;
   alert_active: ActiveAlert | null;
   warning_active: ActiveWarning[];
   prediction_current: CurrentPrediction | null;
