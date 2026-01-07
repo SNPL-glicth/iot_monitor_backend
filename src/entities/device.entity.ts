@@ -37,6 +37,16 @@ export class Device {
   @Column({ name: 'updated_at', type: 'datetime2', nullable: true })
   updatedAt?: Date | null;
 
+  // Rate limiting para activación
+  @Column({ name: 'activation_attempts', type: 'int', default: 0 })
+  activationAttempts!: number;
+
+  @Column({ name: 'last_activation_attempt', type: 'datetime2', nullable: true })
+  lastActivationAttempt?: Date | null;
+
+  @Column({ name: 'activated_from_ip', type: 'varchar', length: 45, nullable: true })
+  activatedFromIp?: string | null;
+
   @OneToMany(() => Sensor, (s) => s.device)
   sensors!: Sensor[];
 

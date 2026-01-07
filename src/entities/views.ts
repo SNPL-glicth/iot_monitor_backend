@@ -37,6 +37,9 @@ export class DeviceWithSensorsView {
 
   @ViewColumn({ name: 'sensor_active' })
   sensorActive!: boolean | null;
+
+  @ViewColumn({ name: 'sensor_status' })
+  sensorStatus!: string | null;
 }
 
 @ViewEntity({ name: 'v_active_alerts' })

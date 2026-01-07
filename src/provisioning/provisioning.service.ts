@@ -15,6 +15,12 @@ import {
   ProvisionDeviceResponseDto,
   ActivateDeviceDto,
   ActivateDeviceResponseDto,
+  DefineSensorDto,
+  DefineSensorResponseDto,
+  PendingSensorDto,
+  ReserveSensorResponseDto,
+  ConfirmSensorDto,
+  ConfirmSensorResponseDto,
 } from './provisioning.dto';
 
 @Injectable()
@@ -41,6 +47,36 @@ export class ProvisioningService {
    */
   private hashApiKey(apiKey: string): string {
     return crypto.createHash('sha256').update(apiKey).digest('hex');
+  }
+
+  /**
+   * Crea un perfil de umbrales para un sensor
+   * Método privado para evitar duplicación de código SQL
+   */
+  private async createThresholdProfile(
+    manager: any,
+    sensorId: string,
+    thresholds: {
+      warningMin?: number;
+      warningMax?: number;
+      alertMin?: number;
+      alertMax?: number;
+    },
+  ): Promise<void> {
+    const hasThresholds = thresholds.warningMin !== undefined || 
+                          thresholds.warningMax !== undefined ||
+                          thresholds.alertMin !== undefined || 
+                          thresholds.alertMax !== undefined;
+
+    if (!hasThresholds) return;
+
+    await manager.query(
+      `INSERT INTO sensor_threshold_profiles 
+       (sensor_id, warning_min, warning_max, alert_min, alert_max, cooldown_seconds)
+       VALUES (@0, @1, @2, @3, @4, 300)`,
+      [sensorId, thresholds.warningMin ?? null, thresholds.warningMax ?? null, 
+       thresholds.alertMin ?? null, thresholds.alertMax ?? null],
+    );
   }
 
   /**
@@ -236,27 +272,62 @@ export class ProvisioningService {
    * Activa un dispositivo (llamado por el FIRMWARE, no por Flutter)
    * Firmware envía: provisioning_code, firmware_version
    * Backend retorna: device_uuid, api_key, ingest_url, sensors
+   * 
+   * ⚠️ Rate limiting:
+   * - Máx 5 intentos por provisioning_code
+   * - Cooldown de 1 minuto entre intentos
+   * - IP registrada para auditoría
    */
-  async activateDevice(dto: ActivateDeviceDto): Promise<ActivateDeviceResponseDto> {
+  async activateDevice(dto: ActivateDeviceDto, clientIp?: string): Promise<ActivateDeviceResponseDto> {
+    const MAX_ATTEMPTS = 5;
+    const RATE_LIMIT_WINDOW_MS = 60000; // 1 minuto
+
+    // 1. Buscar dispositivo por provisioning_code
+    const device = await this.deviceRepo.findOne({
+      where: { provisioningCode: dto.provisioningCode },
+      relations: ['sensors'],
+    });
+
+    if (!device) {
+      // No revelar si el código existe o no
+      throw new BadRequestException('Código de activación inválido o expirado');
+    }
+
+    const now = new Date();
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // RATE LIMITING
+    // ═══════════════════════════════════════════════════════════════════════
+    if (device.activationAttempts >= MAX_ATTEMPTS) {
+      throw new BadRequestException('Máximo de intentos excedido. Contacte al administrador.');
+    }
+
+    if (device.lastActivationAttempt) {
+      const timeSinceLastAttempt = now.getTime() - device.lastActivationAttempt.getTime();
+      if (timeSinceLastAttempt < RATE_LIMIT_WINDOW_MS) {
+        throw new BadRequestException(
+          `Demasiados intentos. Espere ${Math.ceil((RATE_LIMIT_WINDOW_MS - timeSinceLastAttempt) / 1000)} segundos.`
+        );
+      }
+    }
+
+    // Registrar intento
+    device.activationAttempts += 1;
+    device.lastActivationAttempt = now;
+    await this.deviceRepo.save(device);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // VALIDACIONES
+    // ═══════════════════════════════════════════════════════════════════════
+    if (device.status === 'online' || device.status === 'offline') {
+      throw new BadRequestException('Este dispositivo ya fue activado anteriormente');
+    }
+
     const queryRunner = this.dataSource.createQueryRunner();
     await queryRunner.connect();
     await queryRunner.startTransaction();
 
     try {
-      // 1. Buscar dispositivo por provisioning_code
-      const device = await queryRunner.manager.findOne(Device, {
-        where: { provisioningCode: dto.provisioningCode },
-        relations: ['sensors'],
-      });
-
-      if (!device) {
-        throw new NotFoundException('Código de provisioning no encontrado');
-      }
-
-      if (device.status === 'online' || device.status === 'offline') {
-        throw new BadRequestException('Este dispositivo ya fue activado anteriormente');
-      }
-
       // 2. Buscar la API key pendiente
       const apiKeyRecord = await queryRunner.manager.findOne(DeviceApiKey, {
         where: { deviceId: device.id, isActive: false },
@@ -266,7 +337,7 @@ export class ProvisioningService {
         throw new BadRequestException('No hay API key pendiente para este dispositivo');
       }
 
-      // 3. Generar nueva API key para el firmware (la anterior era solo placeholder)
+      // 3. Generar nueva API key para el firmware
       const newApiKey = this.generateApiKey();
       const newApiKeyHash = this.hashApiKey(newApiKey);
 
@@ -277,11 +348,14 @@ export class ProvisioningService {
 
       // 5. Actualizar estado del dispositivo
       device.status = 'offline'; // Esperando primera lectura
+      device.activationAttempts = 0; // Reset intentos en éxito
+      device.lastActivationAttempt = null;
+      device.activatedFromIp = clientIp || null;
       if (dto.firmwareVersion) {
         device.metadata = JSON.stringify({
           ...(device.metadata ? JSON.parse(device.metadata) : {}),
           firmwareVersion: dto.firmwareVersion,
-          activatedAt: new Date().toISOString(),
+          activatedAt: now.toISOString(),
         });
       }
       await queryRunner.manager.save(Device, device);
@@ -340,18 +414,16 @@ export class ProvisioningService {
       const savedSensor = await queryRunner.manager.save(Sensor, sensor);
 
       // 2. Crear umbrales si se especificaron
+      const thresholds = {
+        warningMin: dto.warningMin,
+        warningMax: dto.warningMax,
+        alertMin: dto.alertMin,
+        alertMax: dto.alertMax,
+      };
+      await this.createThresholdProfile(queryRunner.manager, savedSensor.id, thresholds);
+
       const hasThresholds = dto.warningMin !== undefined || dto.warningMax !== undefined ||
                            dto.alertMin !== undefined || dto.alertMax !== undefined;
-
-      if (hasThresholds) {
-        await queryRunner.manager.query(
-          `INSERT INTO sensor_threshold_profiles 
-           (sensor_id, warning_min, warning_max, alert_min, alert_max, cooldown_seconds)
-           VALUES (@0, @1, @2, @3, @4, 300)`,
-          [savedSensor.id, dto.warningMin ?? null, dto.warningMax ?? null, 
-           dto.alertMin ?? null, dto.alertMax ?? null],
-        );
-      }
 
       await queryRunner.commitTransaction();
 
@@ -361,12 +433,7 @@ export class ProvisioningService {
         name: savedSensor.name,
         sensorType: savedSensor.sensorType,
         unit: savedSensor.unit,
-        thresholds: hasThresholds ? {
-          warningMin: dto.warningMin,
-          warningMax: dto.warningMax,
-          alertMin: dto.alertMin,
-          alertMax: dto.alertMax,
-        } : undefined,
+        thresholds: hasThresholds ? thresholds : undefined,
       };
     } catch (error) {
       await queryRunner.rollbackTransaction();
@@ -376,6 +443,351 @@ export class ProvisioningService {
     } finally {
       await queryRunner.release();
     }
+  }
+
+  /**
+   * PASO 1 SENSOR: Definir sensor (lógico, sin hardware)
+   * - Solo tipo, unidad, umbrales
+   * - Estado: DRAFT
+   * - NO tiene nombre aún (viene del QR)
+   * - NO está activo físicamente
+   */
+  async defineSensor(deviceUuid: string, dto: DefineSensorDto): Promise<DefineSensorResponseDto> {
+    const device = await this.deviceRepo.findOne({
+      where: { deviceUuid },
+    });
+
+    if (!device) {
+      throw new NotFoundException(`Dispositivo ${deviceUuid} no encontrado`);
+    }
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      // 1. Crear definición del sensor en estado DRAFT
+      const sensor = queryRunner.manager.create(Sensor, {
+        device: device,
+        sensorType: dto.sensorType,
+        name: `${dto.sensorType}_pending`, // Nombre temporal hasta activación
+        unit: dto.unit,
+        status: 'draft',
+        isActive: false, // NO activo hasta activación
+      });
+
+      const savedSensor = await queryRunner.manager.save(Sensor, sensor);
+
+      // 2. Crear umbrales si se especificaron
+      const thresholds = {
+        warningMin: dto.warningMin,
+        warningMax: dto.warningMax,
+        alertMin: dto.alertMin,
+        alertMax: dto.alertMax,
+      };
+      await this.createThresholdProfile(queryRunner.manager, savedSensor.id, thresholds);
+
+      const hasThresholds = dto.warningMin !== undefined || dto.warningMax !== undefined ||
+                           dto.alertMin !== undefined || dto.alertMax !== undefined;
+
+      await queryRunner.commitTransaction();
+
+      return {
+        sensorUuid: savedSensor.sensorUuid,
+        sensorId: savedSensor.id,
+        sensorType: savedSensor.sensorType,
+        unit: savedSensor.unit,
+        status: 'DRAFT',
+        thresholds: hasThresholds ? thresholds : undefined,
+        message: 'Sensor definido. Siguiente paso: escanear QR del hardware.',
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw new BadRequestException(
+        `Error al definir sensor: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      );
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
+   * PASO 2: Publicar sensor (hacerlo disponible para claim)
+   * Estado: DRAFT → PENDING_CLAIM
+   * 
+   * Validaciones:
+   * - Sensor debe estar en estado DRAFT
+   * - Dispositivo padre debe estar activo (offline/online)
+   */
+  async publishSensor(
+    sensorUuid: string,
+    requireQrConfirmation: boolean = false,
+  ): Promise<{ sensorUuid: string; status: string; message: string }> {
+    const sensor = await this.sensorRepo.findOne({
+      where: { sensorUuid },
+      relations: ['device'],
+    });
+
+    if (!sensor) {
+      throw new NotFoundException(`Sensor ${sensorUuid} no encontrado`);
+    }
+
+    if (sensor.status !== 'draft') {
+      throw new BadRequestException(`Sensor debe estar en estado DRAFT. Estado actual: ${sensor.status}`);
+    }
+
+    // Validar que el dispositivo padre esté activo
+    const deviceStatus = sensor.device?.status;
+    if (deviceStatus !== 'online' && deviceStatus !== 'offline') {
+      throw new BadRequestException(
+        `El dispositivo padre debe estar activo primero. Estado actual: ${deviceStatus}`
+      );
+    }
+
+    sensor.status = 'pending_claim';
+    sensor.requireQrConfirmation = requireQrConfirmation;
+    await this.sensorRepo.save(sensor);
+
+    return {
+      sensorUuid: sensor.sensorUuid,
+      status: 'PENDING_CLAIM',
+      message: 'Sensor publicado. Disponible para que un instalador lo reclame.',
+    };
+  }
+
+  /**
+   * PASO 3: Reservar sensor (instalador selecciona)
+   * Estado: PENDING_CLAIM → PENDING_CONFIRMATION
+   * Genera claim_token temporal
+   */
+  async reserveSensor(
+    sensorUuid: string,
+    userId: string,
+    expiresInMinutes: number = 15,
+  ): Promise<ReserveSensorResponseDto> {
+    const sensor = await this.sensorRepo.findOne({
+      where: { sensorUuid },
+      relations: ['device'],
+    });
+
+    if (!sensor) {
+      throw new NotFoundException(`Sensor ${sensorUuid} no encontrado`);
+    }
+
+    if (sensor.status !== 'pending_claim') {
+      throw new BadRequestException(`Sensor no está disponible para claim. Estado: ${sensor.status}`);
+    }
+
+    // Generar claim_token
+    const claimToken = crypto.randomBytes(16).toString('hex');
+    const expiresAt = new Date();
+    expiresAt.setMinutes(expiresAt.getMinutes() + expiresInMinutes);
+
+    // Reservar sensor
+    sensor.status = 'pending_confirmation';
+    sensor.claimToken = claimToken;
+    sensor.claimTokenExpires = expiresAt;
+    sensor.reservedByUserId = userId;
+    sensor.reservedAt = new Date();
+    await this.sensorRepo.save(sensor);
+
+    // Generar QR solo si es requerido
+    let qrData: string | undefined;
+    if (sensor.requireQrConfirmation) {
+      qrData = JSON.stringify({
+        type: 'sensor_confirm',
+        claim_token: claimToken,
+        sensor_uuid: sensorUuid,
+      });
+    }
+
+    return {
+      sensorUuid: sensor.sensorUuid,
+      sensorType: sensor.sensorType,
+      unit: sensor.unit,
+      deviceName: sensor.device.name,
+      claimToken: claimToken,
+      claimTokenExpires: expiresAt.toISOString(),
+      requireQrConfirmation: sensor.requireQrConfirmation,
+      qrData: qrData,
+      message: sensor.requireQrConfirmation
+        ? 'Sensor reservado. Escanee el QR para confirmar.'
+        : 'Sensor reservado. Puede confirmar directamente.',
+    };
+  }
+
+  /**
+   * PASO 4: Confirmar activación del sensor
+   * Estado: PENDING_CONFIRMATION → ONLINE
+   * 
+   * AUTH IMPLÍCITA por claim_token de un solo uso
+   * 
+   * Validaciones:
+   * 1. Token existe
+   * 2. Token no expirado
+   * 3. Token no usado (sensor en PENDING_CONFIRMATION)
+   * 4. Rate limiting: máx 3 intentos por token
+   * 
+   * En éxito:
+   * - Genera API Key permanente del sensor
+   * - Invalida claim_token
+   * - Cambia estado a ONLINE
+   * 
+   *  NO acepta nombre - el admin lo asigna después
+   */
+  async confirmSensor(
+    dto: ConfirmSensorDto,
+    clientIp?: string,
+  ): Promise<ConfirmSensorResponseDto> {
+    const MAX_ATTEMPTS = 3;
+    const RATE_LIMIT_WINDOW_MS = 60000; // 1 minuto
+
+    // Buscar sensor por claim_token
+    const sensor = await this.sensorRepo.findOne({
+      where: { claimToken: dto.claimToken },
+      relations: ['device'],
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // VALIDACIÓN 1: Token existe
+    // ═══════════════════════════════════════════════════════════════════════
+    if (!sensor) {
+      // No revelar si el token existe o no
+      throw new BadRequestException('Token inválido o expirado');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // VALIDACIÓN 2: Rate limiting por token
+    // ═══════════════════════════════════════════════════════════════════════
+    const now = new Date();
+    
+    // Verificar si excedió intentos
+    if (sensor.confirmAttempts >= MAX_ATTEMPTS) {
+      // Liberar sensor y invalidar token
+      sensor.status = 'pending_claim';
+      sensor.claimToken = null;
+      sensor.claimTokenExpires = null;
+      sensor.reservedByUserId = null;
+      sensor.reservedAt = null;
+      sensor.confirmAttempts = 0;
+      await this.sensorRepo.save(sensor);
+      throw new BadRequestException('Máximo de intentos excedido. El sensor ha sido liberado.');
+    }
+
+    // Rate limit: 1 intento por minuto
+    if (sensor.lastConfirmAttempt) {
+      const timeSinceLastAttempt = now.getTime() - sensor.lastConfirmAttempt.getTime();
+      if (timeSinceLastAttempt < RATE_LIMIT_WINDOW_MS) {
+        throw new BadRequestException(
+          `Demasiados intentos. Espere ${Math.ceil((RATE_LIMIT_WINDOW_MS - timeSinceLastAttempt) / 1000)} segundos.`
+        );
+      }
+    }
+
+    // Registrar intento
+    sensor.confirmAttempts += 1;
+    sensor.lastConfirmAttempt = now;
+    await this.sensorRepo.save(sensor);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // VALIDACIÓN 3: Estado correcto
+    // ═══════════════════════════════════════════════════════════════════════
+    if (sensor.status !== 'pending_confirmation') {
+      throw new BadRequestException('Token inválido o expirado');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // VALIDACIÓN 4: Token no expirado
+    // ═══════════════════════════════════════════════════════════════════════
+    if (sensor.claimTokenExpires && now > sensor.claimTokenExpires) {
+      // Revertir a pending_claim
+      sensor.status = 'pending_claim';
+      sensor.claimToken = null;
+      sensor.claimTokenExpires = null;
+      sensor.reservedByUserId = null;
+      sensor.reservedAt = null;
+      sensor.confirmAttempts = 0;
+      await this.sensorRepo.save(sensor);
+      throw new BadRequestException('Token expirado. El sensor ha sido liberado.');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // GENERAR IDENTIDAD DEL SENSOR (API Key)
+    // ═══════════════════════════════════════════════════════════════════════
+    const sensorApiKey = this.generateSensorApiKey();
+    const apiKeyPrefix = sensorApiKey.substring(0, 8);
+    const apiKeyHash = this.hashApiKey(sensorApiKey);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // ACTIVAR SENSOR
+    // ═══════════════════════════════════════════════════════════════════════
+    // Nombre temporal - el admin lo cambia después
+    sensor.name = `${sensor.sensorType}_${sensor.sensorUuid.substring(0, 8)}`;
+    sensor.status = 'online';
+    sensor.isActive = true;
+    
+    // Limpiar claim_token (ya no se usa)
+    sensor.claimToken = null;
+    sensor.claimTokenExpires = null;
+    sensor.confirmAttempts = 0;
+    sensor.lastConfirmAttempt = null;
+    
+    // Establecer identidad permanente
+    sensor.apiKeyHash = apiKeyHash;
+    sensor.apiKeyPrefix = apiKeyPrefix;
+    sensor.activatedAt = now;
+    sensor.activatedFromIp = clientIp || null;
+    
+    sensor.updatedAt = now;
+    await this.sensorRepo.save(sensor);
+
+    return {
+      sensorUuid: sensor.sensorUuid,
+      sensorId: sensor.id,
+      name: sensor.name,
+      sensorType: sensor.sensorType,
+      unit: sensor.unit,
+      deviceUuid: sensor.device.deviceUuid,
+      deviceName: sensor.device.name,
+      status: 'ONLINE',
+      sensorApiKey: sensorApiKey, // ⚠️ SOLO SE MUESTRA UNA VEZ
+      apiKeyPrefix: apiKeyPrefix,
+      message: '⚠️ Guarde el API Key de forma segura. No se mostrará de nuevo.',
+    };
+  }
+
+  /**
+   * Genera API Key del sensor (prefijo snsr_ + 24 bytes hex)
+   */
+  private generateSensorApiKey(): string {
+    return `snsr_${crypto.randomBytes(24).toString('hex')}`;
+  }
+
+  /**
+   * Lista sensores disponibles para claim (PENDING_CLAIM)
+   * Filtrado opcional por tipo de sensor
+   */
+  async getClaimableSensors(sensorType?: string): Promise<PendingSensorDto[]> {
+    const whereClause: any = { status: 'pending_claim' };
+    if (sensorType) {
+      whereClause.sensorType = sensorType;
+    }
+
+    const sensors = await this.sensorRepo.find({
+      where: whereClause,
+      relations: ['device'],
+      order: { createdAt: 'DESC' },
+    });
+
+    return sensors.map((sensor) => ({
+      sensorUuid: sensor.sensorUuid,
+      sensorType: sensor.sensorType,
+      unit: sensor.unit,
+      deviceUuid: sensor.device.deviceUuid,
+      deviceName: sensor.device.name,
+      status: sensor.status,
+      createdAt: sensor.createdAt.toISOString(),
+    }));
   }
 
   /**
@@ -434,6 +846,79 @@ export class ProvisioningService {
   }
 
   /**
+   * Elimina un sensor (soft delete o hard delete según estado)
+   * Permite eliminar si:
+   * - Sensor está inactivo (isActive: false)
+   * - Sensor está en estados: draft, pending_claim, pending_confirmation
+   * - Dispositivo está offline
+   */
+  async deleteSensor(sensorId: string): Promise<{ message: string }> {
+    const sensor = await this.sensorRepo.findOne({
+      where: { id: sensorId },
+      relations: ['device'],
+    });
+
+    if (!sensor) {
+      throw new NotFoundException(`Sensor ${sensorId} no encontrado`);
+    }
+
+    const allowedStates = ['draft', 'pending_claim', 'pending_confirmation', 'revoked'];
+    const currentStatus = (sensor.status || '').toLowerCase();
+    const deviceStatus = (sensor.device?.status || '').toLowerCase();
+    const isDeviceOnline = deviceStatus === 'online';
+    
+    // Permitir eliminar si:
+    // 1. Sensor está inactivo, O
+    // 2. Status está en estados permitidos, O
+    // 3. Dispositivo está offline
+    const canDelete = !sensor.isActive || 
+                      allowedStates.includes(currentStatus) || 
+                      !isDeviceOnline;
+
+    if (!canDelete) {
+      throw new BadRequestException(
+        `No se puede eliminar un sensor activo mientras el dispositivo está online. ` +
+        `Desactive el sensor primero o espere a que el dispositivo esté offline.`
+      );
+    }
+
+    // Soft delete: marcar como revocado
+    await this.sensorRepo.update(sensorId, {
+      isActive: false,
+      status: 'revoked',
+      updatedAt: new Date(),
+    });
+
+    return {
+      message: `Sensor ${sensor.name || sensorId} eliminado correctamente.`,
+    };
+  }
+
+  /**
+   * Actualiza datos básicos de un sensor (nombre)
+   */
+  async updateSensor(sensorId: string, data: { name?: string }): Promise<{ message: string }> {
+    const sensor = await this.sensorRepo.findOne({
+      where: { id: sensorId },
+    });
+
+    if (!sensor) {
+      throw new NotFoundException(`Sensor ${sensorId} no encontrado`);
+    }
+
+    if (data.name) {
+      sensor.name = data.name;
+    }
+    sensor.updatedAt = new Date();
+    
+    await this.sensorRepo.save(sensor);
+
+    return {
+      message: `Sensor actualizado correctamente.`,
+    };
+  }
+
+  /**
    * Revoca todas las API keys de un dispositivo (desactiva el dispositivo)
    */
   async revokeAllKeys(deviceUuid: string): Promise<{ message: string }> {
@@ -454,4 +939,5 @@ export class ProvisioningService {
       message: `Todas las API keys del dispositivo ${deviceUuid} han sido revocadas.`,
     };
   }
+
 }

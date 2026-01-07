@@ -3,6 +3,8 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseIntPipe,
   Patch,
@@ -243,5 +245,16 @@ export class MonitoringController {
   @Roles('admin', 'operator', 'viewer')
   getDbDebug(@Query('sensorId') sensorId?: string) {
     return this.monitoringService.getDbDebug(sensorId);
+  }
+
+  /**
+   * DELETE /monitoring/sensors/:sensorId
+   * Elimina un sensor (soft delete)
+   */
+  @Delete('sensors/:sensorId')
+  @Roles('admin')
+  @HttpCode(HttpStatus.OK)
+  async deleteSensor(@Param('sensorId', ParseIntPipe) sensorId: number) {
+    return this.monitoringService.deleteSensor(sensorId);
   }
 }
