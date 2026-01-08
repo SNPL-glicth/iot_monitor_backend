@@ -1,4 +1,4 @@
-import { Column, Entity, OneToMany, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, Entity, Generated, OneToMany, PrimaryGeneratedColumn } from 'typeorm';
 import { Sensor } from './sensor.entity';
 import { UserDevice } from './user-device.entity';
 import { Alert } from './alert.entity';
@@ -11,6 +11,7 @@ export class Device {
   id!: string;
 
   @Column({ name: 'device_uuid', type: 'uniqueidentifier' })
+  @Generated('uuid')
   deviceUuid!: string;
 
   @Column({ type: 'varchar', length: 255 })
@@ -20,7 +21,7 @@ export class Device {
   deviceType!: string;
 
   @Column({ type: 'varchar', length: 50 })
-  status!: 'draft' | 'pending_activation' | 'online' | 'offline' | 'maintenance' | 'error';
+  status!: 'draft' | 'pending_activation' | 'online' | 'offline' | 'maintenance' | 'error' | 'deleted';
 
   @Column({ name: 'provisioning_code', type: 'varchar', length: 20, nullable: true, unique: true })
   provisioningCode?: string | null;

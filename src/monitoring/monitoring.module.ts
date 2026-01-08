@@ -4,6 +4,7 @@ import { HttpModule } from '@nestjs/axios';
 import { MonitoringController } from './monitoring.controller';
 import { MonitoringService } from './monitoring.service';
 import { SensorStatusController } from './sensor-status.controller';
+import { RateLimitGuard } from '../common/rate-limit.guard';
 import { Device } from '../entities/device.entity';
 import { NotificationsModule } from '../notifications/notifications.module';
 import { Sensor } from '../entities/sensor.entity';
@@ -42,7 +43,7 @@ import {
     ]),
   ],
   controllers: [MonitoringController, SensorStatusController],
-  providers: [MonitoringService],
+  providers: [MonitoringService, RateLimitGuard],
   exports: [MonitoringService],
 })
 export class MonitoringModule {}

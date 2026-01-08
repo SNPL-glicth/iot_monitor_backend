@@ -488,7 +488,13 @@ export class MonitoringService {
   }
 
   /**
-   * Estado consolidado de un sensor: última lectura, alertas activas, estado.
+   * Estado consolidado de un sensor: última lectura, alertas activas, warnings, predicciones, estado.
+   * 
+   * FIX AUDITORIA: Ahora evalúa correctamente el estado final considerando:
+   * 1. Alertas activas (tabla alerts)
+   * 2. Valor actual vs umbrales (evaluación en tiempo real)
+   * 3. Warnings activos (tabla ml_events con DELTA_SPIKE)
+   * 4. Predicciones de breach
    */
   async getSensorConsolidatedStatus(sensorId: number) {
     const sensor = await this.sensorRepo.findOne({
@@ -499,23 +505,118 @@ export class MonitoringService {
       throw new NotFoundException('Sensor no encontrado');
     }
 
-    const latestReading = await this.sensorReadingRepo.findOne({
-      where: { sensor: { id: String(sensorId) } },
-      order: { timestamp: 'DESC' },
+    // Obtener datos en paralelo para mejor performance
+    const [latestReading, activeAlerts, activeWarnings, latestPrediction, thresholds] = await Promise.all([
+      this.sensorReadingRepo.findOne({
+        where: { sensor: { id: String(sensorId) } },
+        order: { timestamp: 'DESC' },
+      }),
+      this.alertRepo.find({
+        where: {
+          sensor: { id: String(sensorId) },
+          status: 'active',
+        },
+        relations: ['threshold'],
+        order: { triggeredAt: 'DESC' },
+        take: 5,
+      }),
+      this.mlEventActiveViewRepo.find({
+        where: { sensorId: String(sensorId) },
+        order: { createdAt: 'DESC' },
+        take: 5,
+      }),
+      this.predictionRepo.findOne({
+        where: { sensor: { id: String(sensorId) } },
+        relations: ['model'],
+        order: { predictedAt: 'DESC' },
+      }),
+      this.getSensorThresholds(sensorId),
+    ]);
+
+    // Extraer umbrales para evaluación
+    const warningThreshold = thresholds.find((t) => t.severity === 'warning');
+    const alertThreshold = thresholds.find((t) => t.severity === 'critical');
+
+    // Evaluar estado del valor actual contra umbrales
+    const currentValue = latestReading?.value !== null && latestReading?.value !== undefined
+      ? Number(latestReading.value)
+      : null;
+
+    const telemetryState = evaluateTelemetryState(currentValue, {
+      warningMin: warningThreshold?.thresholdValueMin !== null ? Number(warningThreshold?.thresholdValueMin) : null,
+      warningMax: warningThreshold?.thresholdValueMax !== null ? Number(warningThreshold?.thresholdValueMax) : null,
+      alertMin: alertThreshold?.thresholdValueMin !== null ? Number(alertThreshold?.thresholdValueMin) : null,
+      alertMax: alertThreshold?.thresholdValueMax !== null ? Number(alertThreshold?.thresholdValueMax) : null,
     });
 
-    const activeAlerts = await this.alertRepo.find({
-      where: {
-        sensor: { id: String(sensorId) },
-        status: 'active',
-      },
-      order: { triggeredAt: 'DESC' },
-      take: 5,
-    });
+    // Verificar si predicción cruzaría umbrales
+    let predictionWouldBreach = false;
+    if (latestPrediction) {
+      const predValue = Number(latestPrediction.predictedValue);
+      const predState = evaluateTelemetryState(predValue, {
+        warningMin: warningThreshold?.thresholdValueMin !== null ? Number(warningThreshold?.thresholdValueMin) : null,
+        warningMax: warningThreshold?.thresholdValueMax !== null ? Number(warningThreshold?.thresholdValueMax) : null,
+        alertMin: alertThreshold?.thresholdValueMin !== null ? Number(alertThreshold?.thresholdValueMin) : null,
+        alertMax: alertThreshold?.thresholdValueMax !== null ? Number(alertThreshold?.thresholdValueMax) : null,
+      });
+      predictionWouldBreach = predState !== SensorTelemetryState.NORMAL;
+    }
 
-    const thresholds = await this.getSensorThresholds(sensorId);
+    // Calcular estado final con prioridad: ALERT > WARNING > PREDICTION > NORMAL
+    let finalState: string;
+    if (activeAlerts.length > 0 || telemetryState === SensorTelemetryState.ALERT) {
+      finalState = SensorFinalState.ALERT;
+    } else if (activeWarnings.length > 0 || telemetryState === SensorTelemetryState.WARNING) {
+      finalState = SensorFinalState.WARNING;
+    } else if (latestPrediction && predictionWouldBreach) {
+      finalState = SensorFinalState.PREDICTION;
+    } else {
+      finalState = SensorFinalState.NORMAL;
+    }
+
+    // Formatear warning activo para respuesta
+    const warningActive = activeWarnings.length > 0 ? {
+      id: activeWarnings[0].eventId,
+      sensor_id: activeWarnings[0].sensorId,
+      device_id: activeWarnings[0].deviceId,
+      event_type: activeWarnings[0].eventType,
+      event_code: activeWarnings[0].eventCode,
+      status: activeWarnings[0].status,
+      created_at: this.formatDateTime(activeWarnings[0].createdAt),
+      title: activeWarnings[0].title,
+      message: activeWarnings[0].message,
+    } : null;
+
+    // Formatear predicción para respuesta
+    const predictionCurrent = latestPrediction ? {
+      id: latestPrediction.id,
+      sensor_id: String(sensorId),
+      model_id: latestPrediction.model?.id ?? null,
+      predicted_value: latestPrediction.predictedValue,
+      confidence: latestPrediction.confidence,
+      predicted_at: this.formatDateTime(latestPrediction.predictedAt),
+      target_timestamp: this.formatDateTime(latestPrediction.targetTimestamp),
+    } : null;
+
+    // Formatear alerta activa para respuesta
+    const alertActive = activeAlerts.length > 0 ? {
+      id: activeAlerts[0].id,
+      sensor_id: String(sensorId),
+      device_id: sensor.device?.id ?? null,
+      threshold_id: activeAlerts[0].threshold?.id ?? null,
+      severity: activeAlerts[0].severity,
+      status: activeAlerts[0].status,
+      triggered_value: activeAlerts[0].triggeredValue,
+      triggered_at: this.formatDateTime(activeAlerts[0].triggeredAt),
+    } : null;
 
     return {
+      sensor_id: sensor.id,
+      final_state: finalState,
+      alert_active: alertActive,
+      warning_active: warningActive,
+      prediction_current: predictionCurrent,
+      // Campos adicionales para compatibilidad
       sensorId: sensor.id,
       sensorName: sensor.name,
       sensorType: sensor.sensorType,
@@ -532,13 +633,16 @@ export class MonitoringService {
         triggeredAt: this.formatDateTime(a.triggeredAt),
       })),
       thresholds,
-      status: activeAlerts.length > 0 ? SensorFinalState.ALERT : SensorFinalState.NORMAL,
+      status: finalState,
     };
   }
 
   /**
    * Estado consolidado en batch para múltiples sensores.
+   * FASE 3: Límite máximo de IDs para prevenir DoS
    */
+  private static readonly MAX_BATCH_SIZE = 100;
+
   async getSensorConsolidatedStatusBatch(idsRaw: string) {
     const ids = (idsRaw || '')
       .split(',')
@@ -548,6 +652,13 @@ export class MonitoringService {
 
     if (ids.length === 0) {
       return [];
+    }
+
+    // FASE 3: Validación de longitud máxima
+    if (ids.length > MonitoringService.MAX_BATCH_SIZE) {
+      throw new BadRequestException(
+        `Máximo ${MonitoringService.MAX_BATCH_SIZE} sensores por batch. Recibidos: ${ids.length}`
+      );
     }
 
     const results = await Promise.all(

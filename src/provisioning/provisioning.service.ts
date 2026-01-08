@@ -919,6 +919,80 @@ export class ProvisioningService {
   }
 
   /**
+   * Elimina un dispositivo (soft delete)
+   * 
+   * Permite eliminar si:
+   * - Dispositivo está en estados: draft, pending_activation, offline
+   * - No tiene sensores activos online
+   */
+  async deleteDevice(deviceId: string): Promise<{ message: string }> {
+    const device = await this.deviceRepo.findOne({
+      where: { id: deviceId },
+      relations: ['sensors'],
+    });
+
+    if (!device) {
+      throw new NotFoundException(`Dispositivo ${deviceId} no encontrado`);
+    }
+
+    const allowedStates = ['draft', 'pending_activation', 'offline', 'error', 'deleted'];
+    const currentStatus = (device.status || '').toLowerCase();
+    
+    // Verificar si hay sensores activos online
+    const activeSensorsOnline = (device.sensors || []).filter(
+      s => s.isActive && s.status === 'online'
+    );
+
+    const canDelete = allowedStates.includes(currentStatus) || activeSensorsOnline.length === 0;
+
+    if (!canDelete) {
+      throw new BadRequestException(
+        `No se puede eliminar un dispositivo con sensores activos online. ` +
+        `Desactive los sensores primero o espere a que estén offline.`
+      );
+    }
+
+    // Soft delete: marcar dispositivo y todos sus sensores como revocados
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      // Revocar todos los sensores del dispositivo
+      await queryRunner.manager.update(
+        Sensor,
+        { device: { id: deviceId } },
+        { isActive: false, status: 'revoked', updatedAt: new Date() }
+      );
+
+      // Revocar todas las API keys
+      await queryRunner.manager.update(
+        DeviceApiKey,
+        { deviceId: device.id, revokedAt: IsNull() },
+        { revokedAt: new Date(), isActive: false }
+      );
+
+      // Marcar dispositivo como eliminado (soft delete explícito)
+      await queryRunner.manager.update(
+        Device,
+        { id: deviceId },
+        { status: 'deleted', updatedAt: new Date() }
+      );
+
+      await queryRunner.commitTransaction();
+
+      return {
+        message: `Dispositivo ${device.name || deviceId} y sus ${device.sensors?.length || 0} sensores eliminados correctamente.`,
+      };
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
    * Revoca todas las API keys de un dispositivo (desactiva el dispositivo)
    */
   async revokeAllKeys(deviceUuid: string): Promise<{ message: string }> {

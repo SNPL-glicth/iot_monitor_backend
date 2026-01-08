@@ -2,6 +2,7 @@ import {
   Column,
   Entity,
   JoinColumn,
+  Generated,
   ManyToOne,
   OneToMany,
   OneToOne,
@@ -25,6 +26,7 @@ export class Sensor {
   device!: Device;
 
   @Column({ name: 'sensor_uuid', type: 'uniqueidentifier' })
+  @Generated('uuid')
   sensorUuid!: string;
 
   @Column({ name: 'sensor_type', type: 'varchar', length: 100 })

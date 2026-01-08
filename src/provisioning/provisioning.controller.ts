@@ -201,6 +201,20 @@ export class ProvisioningController {
   }
 
   /**
+   * Elimina un dispositivo (soft delete)
+   * Solo permite eliminar dispositivos en estado: draft, pending_activation, offline
+   * o que no tengan sensores activos online
+   */
+  @Delete(':deviceId')
+  @Roles('admin')
+  @HttpCode(HttpStatus.OK)
+  async deleteDevice(
+    @Param('deviceId') deviceId: string,
+  ): Promise<{ message: string }> {
+    return this.provisioningService.deleteDevice(deviceId);
+  }
+
+  /**
    * Elimina un sensor (soft delete)
    * Solo permite eliminar sensores en estado: draft, pending_claim, pending_confirmation o inactivos
    */
