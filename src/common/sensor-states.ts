@@ -33,9 +33,14 @@ export const SensorFinalState = {
   ALERT: 'alert',
   /** Predicción de posible breach futuro */
   PREDICTION: 'prediction',
+  /** Sensor sin datos recientes (> STALE_THRESHOLD_MS) */
+  STALE: 'stale',
   /** Estado no determinable */
   UNKNOWN: 'unknown',
 } as const;
+
+/** Umbral para considerar un sensor como STALE (sin datos recientes) */
+export const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 horas
 
 export type SensorFinalStateType = typeof SensorFinalState[keyof typeof SensorFinalState];
 

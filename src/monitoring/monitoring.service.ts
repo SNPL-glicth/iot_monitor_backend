@@ -8,6 +8,7 @@ import {
   SensorTelemetryState,
   SensorFinalState,
   evaluateTelemetryState,
+  STALE_THRESHOLD_MS,
 } from '../common/sensor-states';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -562,9 +563,17 @@ export class MonitoringService {
       predictionWouldBreach = predState !== SensorTelemetryState.NORMAL;
     }
 
-    // Calcular estado final con prioridad: ALERT > WARNING > PREDICTION > NORMAL
+    // AUDITORIA 3.6: Detectar sensor STALE (sin datos recientes)
+    const now = new Date();
+    const lastReadingTime = latestReading?.timestamp ? new Date(latestReading.timestamp).getTime() : 0;
+    const timeSinceLastReading = now.getTime() - lastReadingTime;
+    const isStale = lastReadingTime === 0 || timeSinceLastReading > STALE_THRESHOLD_MS;
+
+    // Calcular estado final con prioridad: STALE > ALERT > WARNING > PREDICTION > NORMAL
     let finalState: string;
-    if (activeAlerts.length > 0 || telemetryState === SensorTelemetryState.ALERT) {
+    if (isStale) {
+      finalState = SensorFinalState.STALE;
+    } else if (activeAlerts.length > 0 || telemetryState === SensorTelemetryState.ALERT) {
       finalState = SensorFinalState.ALERT;
     } else if (activeWarnings.length > 0 || telemetryState === SensorTelemetryState.WARNING) {
       finalState = SensorFinalState.WARNING;
