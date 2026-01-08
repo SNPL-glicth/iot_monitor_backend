@@ -791,6 +791,7 @@ export class MonitoringService {
 
   /**
    * Crea o actualiza perfil de umbrales del sensor.
+   * Guarda en alert_thresholds: 1 registro "warning" y 1 registro "critical".
    */
   async upsertSensorThresholdProfile(
     sensorId: number,
@@ -809,16 +810,60 @@ export class MonitoringService {
       throw new NotFoundException('Sensor no encontrado');
     }
 
-    // Retornar el perfil actualizado
-    return {
-      sensorId,
-      warningMin: body.warningMin ?? null,
-      warningMax: body.warningMax ?? null,
-      alertMin: body.alertMin ?? null,
-      alertMax: body.alertMax ?? null,
-      cooldownSeconds: body.cooldownSeconds ?? 300,
-      updated: true,
-    };
+    // Buscar umbrales existentes para este sensor
+    const existingThresholds = await this.thresholdRepo.find({
+      where: { sensor: { id: String(sensorId) } },
+    });
+
+    const warningThreshold = existingThresholds.find(t => t.severity === 'warning');
+    const criticalThreshold = existingThresholds.find(t => t.severity === 'critical');
+
+    // Upsert WARNING threshold
+    if (body.warningMin !== undefined || body.warningMax !== undefined) {
+      if (warningThreshold) {
+        // Actualizar existente
+        warningThreshold.thresholdValueMin = body.warningMin?.toString() ?? null;
+        warningThreshold.thresholdValueMax = body.warningMax?.toString() ?? null;
+        await this.thresholdRepo.save(warningThreshold);
+      } else if (body.warningMin !== null || body.warningMax !== null) {
+        // Crear nuevo si hay valores
+        const newWarning = this.thresholdRepo.create({
+          sensor,
+          name: 'Warning Level',
+          conditionType: 'out_of_range',
+          thresholdValueMin: body.warningMin?.toString() ?? null,
+          thresholdValueMax: body.warningMax?.toString() ?? null,
+          severity: 'warning',
+          isActive: true,
+        });
+        await this.thresholdRepo.save(newWarning);
+      }
+    }
+
+    // Upsert CRITICAL/ALERT threshold
+    if (body.alertMin !== undefined || body.alertMax !== undefined) {
+      if (criticalThreshold) {
+        // Actualizar existente
+        criticalThreshold.thresholdValueMin = body.alertMin?.toString() ?? null;
+        criticalThreshold.thresholdValueMax = body.alertMax?.toString() ?? null;
+        await this.thresholdRepo.save(criticalThreshold);
+      } else if (body.alertMin !== null || body.alertMax !== null) {
+        // Crear nuevo si hay valores
+        const newCritical = this.thresholdRepo.create({
+          sensor,
+          name: 'Alert Level',
+          conditionType: 'out_of_range',
+          thresholdValueMin: body.alertMin?.toString() ?? null,
+          thresholdValueMax: body.alertMax?.toString() ?? null,
+          severity: 'critical',
+          isActive: true,
+        });
+        await this.thresholdRepo.save(newCritical);
+      }
+    }
+
+    // Retornar el perfil actualizado (leer de DB para confirmar)
+    return this.getSensorThresholdProfile(sensorId);
   }
 
   /**
