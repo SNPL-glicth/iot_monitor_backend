@@ -248,6 +248,16 @@ export class MonitoringController {
   }
 
   /**
+   * GET /monitoring/ml-health
+   * Estado general del sistema de ML (predicciones, sensores analizados, etc.)
+   */
+  @Get('ml-health')
+  @Roles('admin', 'operator', 'viewer')
+  getMlHealth() {
+    return this.monitoringService.getMlHealth();
+  }
+
+  /**
    * DELETE /monitoring/sensors/:sensorId
    * Elimina un sensor (soft delete)
    */

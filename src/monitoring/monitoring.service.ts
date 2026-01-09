@@ -241,10 +241,12 @@ export class MonitoringService {
   /**
    * Inserta una lectura para un sensor usando el SP sp_insert_reading_and_check_threshold
    * Esto también evaluará los umbrales y generará alertas si corresponde.
+   * 
+   * FIX: SQL Server no soporta ? como placeholder. Usar @0, @1 para TypeORM.
    */
   async insertSensorReading(sensorId: number, value: number) {
     await this.dataSource.query(
-      'EXEC sp_insert_reading_and_check_threshold @p_sensor_id = ?, @p_value = ?',
+      'EXEC sp_insert_reading_and_check_threshold @p_sensor_id = @0, @p_value = @1',
       [sensorId, value],
     );
   }
@@ -1122,6 +1124,72 @@ export class MonitoringService {
         activeCritical,
         activeWarning,
       },
+    };
+  }
+
+  /**
+   * Estado general del sistema de ML para observabilidad.
+   */
+  async getMlHealth(): Promise<{
+    status: string;
+    lastRunAt: string;
+    sensorsAnalyzed: number;
+    sensorsOmitted: number;
+    reasonsOmitted: { reason: string; count: number }[];
+  }> {
+    // Obtener última predicción para saber cuándo corrió el ML
+    const lastPrediction = await this.dataSource.query(`
+      SELECT TOP 1 predicted_at
+      FROM predictions
+      ORDER BY predicted_at DESC
+    `);
+    const lastRunAt = lastPrediction?.[0]?.predicted_at?.toISOString?.() ?? '';
+
+    // Contar sensores activos analizados (con predicciones recientes)
+    const sensorsWithPredictions = await this.dataSource.query(`
+      SELECT COUNT(DISTINCT sensor_id) as cnt
+      FROM predictions
+      WHERE predicted_at >= DATEADD(day, -1, GETDATE())
+    `);
+    const sensorsAnalyzed = Number(sensorsWithPredictions?.[0]?.cnt ?? 0);
+
+    // Contar sensores activos totales
+    const totalSensors = await this.dataSource.query(`
+      SELECT COUNT(*) as cnt FROM sensors WHERE is_active = 1
+    `);
+    const totalActive = Number(totalSensors?.[0]?.cnt ?? 0);
+    const sensorsOmitted = Math.max(0, totalActive - sensorsAnalyzed);
+
+    // Razones de omisión (simplificado)
+    const reasonsOmitted: { reason: string; count: number }[] = [];
+    if (sensorsOmitted > 0) {
+      // Sensores sin lecturas recientes
+      const noRecentReadings = await this.dataSource.query(`
+        SELECT COUNT(*) as cnt
+        FROM sensors s
+        WHERE s.is_active = 1
+          AND NOT EXISTS (
+            SELECT 1 FROM sensor_readings sr
+            WHERE sr.sensor_id = s.id
+              AND sr.timestamp >= DATEADD(hour, -24, GETDATE())
+          )
+      `);
+      const noDataCount = Number(noRecentReadings?.[0]?.cnt ?? 0);
+      if (noDataCount > 0) {
+        reasonsOmitted.push({ reason: 'Sin lecturas en 24h', count: noDataCount });
+      }
+    }
+
+    // Determinar estado
+    const isOk = sensorsAnalyzed > 0 && lastRunAt !== '';
+    const status = isOk ? 'OK' : 'DEGRADED';
+
+    return {
+      status,
+      lastRunAt,
+      sensorsAnalyzed,
+      sensorsOmitted,
+      reasonsOmitted,
     };
   }
 }
