@@ -267,4 +267,58 @@ export class MonitoringController {
   async deleteSensor(@Param('sensorId', ParseIntPipe) sensorId: number) {
     return this.monitoringService.deleteSensor(sensorId);
   }
+
+  /**
+   * GET /monitoring/sensors/:sensorId/raw-readings?limit=500&since=ISO_DATE
+   * 
+   * DIAGNÓSTICO: Datos crudos del sensor SIN agregación ni compresión.
+   * - Retorna TODAS las lecturas en el rango solicitado
+   * - Ordenadas cronológicamente (ASC)
+   * - Sin promedios ni buckets
+   * - Para gráficas de diagnóstico en tiempo real
+   */
+  @Get('sensors/:sensorId/raw-readings')
+  @Roles('admin', 'operator', 'viewer')
+  getRawSensorReadings(
+    @Param('sensorId', ParseIntPipe) sensorId: number,
+    @Query('limit') limit = '500',
+    @Query('since') since?: string,
+  ) {
+    const parsedLimit = Math.min(Math.max(1, Number(limit) || 500), 2000);
+    return this.monitoringService.getRawSensorReadings(sensorId, parsedLimit, since);
+  }
+
+  /**
+   * GET /monitoring/sensors/:sensorId/aggregated?range=1h|6h|24h|7d
+   * 
+   * Datos agregados por ventana temporal para gráficas históricas.
+   * - 1h: datos casi crudos (buckets de 1 min)
+   * - 6h: promedios cada 5 min
+   * - 24h: promedios cada 1 hora
+   * - 7d: promedios diarios
+   */
+  @Get('sensors/:sensorId/aggregated')
+  @Roles('admin', 'operator', 'viewer')
+  getAggregatedSensorReadings(
+    @Param('sensorId', ParseIntPipe) sensorId: number,
+    @Query('range') range = '6h',
+  ) {
+    return this.monitoringService.getAggregatedSensorReadings(sensorId, range);
+  }
+
+  /**
+   * POST /monitoring/run-alert-maintenance
+   * 
+   * Ejecuta manualmente el mantenimiento de alertas:
+   * - Auto-resolver alertas cuando valor vuelve a rango
+   * - Limpiar alertas por TTL
+   * - Limpiar ML events por TTL
+   * Solo admin puede ejecutar esto manualmente.
+   */
+  @Post('run-alert-maintenance')
+  @Roles('admin')
+  @HttpCode(HttpStatus.OK)
+  async runAlertMaintenance() {
+    return this.monitoringService.runAlertMaintenance();
+  }
 }

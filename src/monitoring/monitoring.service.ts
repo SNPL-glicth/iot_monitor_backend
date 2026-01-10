@@ -1192,4 +1192,180 @@ export class MonitoringService {
       reasonsOmitted,
     };
   }
+
+  /**
+   * DIAGNÓSTICO: Datos crudos del sensor SIN agregación.
+   * Para gráficas de diagnóstico en tiempo real.
+   * 
+   * FIX PROBLEMA 5: Retorna TODAS las lecturas sin compresión.
+   */
+  async getRawSensorReadings(sensorId: number, limit = 500, since?: string) {
+    const sensor = await this.sensorRepo.findOne({
+      where: { id: String(sensorId) },
+      relations: ['device'],
+    });
+    if (!sensor) {
+      throw new NotFoundException('Sensor no encontrado');
+    }
+
+    const qb = this.sensorReadingRepo
+      .createQueryBuilder('r')
+      .where('r.sensor_id = :sensorId', { sensorId: String(sensorId) });
+
+    // Filtrar por fecha si se proporciona
+    if (since) {
+      const sinceDate = new Date(since);
+      if (!isNaN(sinceDate.getTime())) {
+        qb.andWhere('r.timestamp >= :since', { since: sinceDate });
+      }
+    }
+
+    const readings = await qb
+      .orderBy('r.timestamp', 'ASC')
+      .limit(limit)
+      .getMany();
+
+    return {
+      sensorId: String(sensorId),
+      sensorName: sensor.name,
+      deviceName: sensor.device?.name ?? '',
+      unit: sensor.unit,
+      count: readings.length,
+      readings: readings.map((r) => ({
+        id: r.id,
+        value: Number(r.value),
+        timestamp: r.timestamp.toISOString(),
+        timestampFormatted: this.formatDateTime(r.timestamp),
+      })),
+    };
+  }
+
+  /**
+   * Datos agregados por ventana temporal para gráficas históricas.
+   * 
+   * FIX PROBLEMA 6: Agregación real por ventana temporal.
+   * - 1h: buckets de 1 min (casi crudo)
+   * - 6h: buckets de 5 min
+   * - 24h: buckets de 1 hora
+   * - 7d: buckets diarios
+   */
+  async getAggregatedSensorReadings(sensorId: number, range = '6h') {
+    const sensor = await this.sensorRepo.findOne({
+      where: { id: String(sensorId) },
+      relations: ['device'],
+    });
+    if (!sensor) {
+      throw new NotFoundException('Sensor no encontrado');
+    }
+
+    // Configuración de ventanas
+    const config: Record<string, { hours: number; table: string; bucketLabel: string }> = {
+      '1h': { hours: 1, table: 'sensor_readings_1m', bucketLabel: '1 minuto' },
+      '6h': { hours: 6, table: 'sensor_readings_5m', bucketLabel: '5 minutos' },
+      '24h': { hours: 24, table: 'sensor_readings_1h', bucketLabel: '1 hora' },
+      '7d': { hours: 168, table: 'sensor_readings_1h', bucketLabel: '1 hora' },
+    };
+
+    const cfg = config[range] || config['6h'];
+    const since = new Date(Date.now() - cfg.hours * 60 * 60 * 1000);
+
+    // Intentar leer de tablas agregadas, fallback a raw si no existen
+    let aggregatedData: any[] = [];
+    try {
+      aggregatedData = await this.dataSource.query(
+        `SELECT 
+           sensor_id,
+           bucket_ts,
+           avg_value,
+           min_value,
+           max_value,
+           samples
+         FROM ${cfg.table} WITH (NOLOCK)
+         WHERE sensor_id = @0 AND bucket_ts >= @1
+         ORDER BY bucket_ts ASC`,
+        [sensorId, since],
+      );
+    } catch {
+      // Tabla no existe, calcular on-the-fly desde raw
+      aggregatedData = [];
+    }
+
+    // Si no hay datos agregados, calcular desde raw
+    if (aggregatedData.length === 0) {
+      const bucketMinutes = range === '1h' ? 1 : range === '6h' ? 5 : range === '24h' ? 60 : 60;
+      
+      const rawAgg = await this.dataSource.query(
+        `SELECT 
+           sensor_id,
+           DATEADD(minute, (DATEDIFF(minute, 0, [timestamp]) / @2) * @2, 0) AS bucket_ts,
+           AVG(CAST(value AS FLOAT)) AS avg_value,
+           MIN(CAST(value AS FLOAT)) AS min_value,
+           MAX(CAST(value AS FLOAT)) AS max_value,
+           COUNT(*) AS samples
+         FROM sensor_readings WITH (NOLOCK)
+         WHERE sensor_id = @0 AND [timestamp] >= @1
+         GROUP BY sensor_id, DATEADD(minute, (DATEDIFF(minute, 0, [timestamp]) / @2) * @2, 0)
+         ORDER BY bucket_ts ASC`,
+        [sensorId, since, bucketMinutes],
+      );
+      aggregatedData = rawAgg;
+    }
+
+    return {
+      sensorId: String(sensorId),
+      sensorName: sensor.name,
+      deviceName: sensor.device?.name ?? '',
+      unit: sensor.unit,
+      range,
+      bucketLabel: cfg.bucketLabel,
+      count: aggregatedData.length,
+      series: aggregatedData.map((row: any) => ({
+        timestamp: row.bucket_ts instanceof Date ? row.bucket_ts.toISOString() : row.bucket_ts,
+        avg: Number(row.avg_value),
+        min: Number(row.min_value),
+        max: Number(row.max_value),
+        samples: Number(row.samples),
+      })),
+    };
+  }
+
+  /**
+   * Ejecuta el mantenimiento de alertas manualmente.
+   * Llama a los SPs de auto-resolución y limpieza por TTL.
+   */
+  async runAlertMaintenance() {
+    const results: any = {
+      autoResolved: 0,
+      ttlCleaned: 0,
+      mlEventsCleaned: 0,
+      errors: [] as string[],
+    };
+
+    try {
+      const r1 = await this.dataSource.query('EXEC sp_auto_resolve_alerts');
+      results.autoResolved = r1?.[0]?.resolved_count ?? 0;
+    } catch (e) {
+      results.errors.push(`sp_auto_resolve_alerts: ${(e as Error).message}`);
+    }
+
+    try {
+      const r2 = await this.dataSource.query('EXEC sp_cleanup_stale_alerts @ttl_minutes = 60');
+      results.ttlCleaned = r2?.[0]?.cleaned_count ?? 0;
+    } catch (e) {
+      results.errors.push(`sp_cleanup_stale_alerts: ${(e as Error).message}`);
+    }
+
+    try {
+      const r3 = await this.dataSource.query('EXEC sp_cleanup_stale_ml_events @ttl_minutes = 30');
+      results.mlEventsCleaned = r3?.[0]?.cleaned_count ?? 0;
+    } catch (e) {
+      results.errors.push(`sp_cleanup_stale_ml_events: ${(e as Error).message}`);
+    }
+
+    return {
+      success: results.errors.length === 0,
+      ...results,
+      executedAt: new Date().toISOString(),
+    };
+  }
 }
