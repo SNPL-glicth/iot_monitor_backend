@@ -1082,6 +1082,16 @@ export class MonitoringService {
       where: { sensor: { id: String(sensorId) }, status: 'active', severity: 'warning' },
     });
 
+    // Último evento ML relevante para UI (excluye DELTA_SPIKE).
+    // No recalcula nada: solo expone lo ya persistido en ml_events (v_ml_events_active).
+    const latestMlEvent = await this.mlEventActiveViewRepo
+      .createQueryBuilder('e')
+      .where('e.sensorId = :sid', { sid: String(sensorId) })
+      .andWhere("e.eventCode <> 'DELTA_SPIKE'")
+      .orderBy('e.createdAt', 'DESC')
+      .limit(1)
+      .getOne();
+
     // Obtener umbral de delta desde BD (INC-05: evitar hardcoded)
     const deltaThreshold = await this.getDeltaThresholdForSensor(sensorId);
 
@@ -1106,7 +1116,14 @@ export class MonitoringService {
 
       // INC-05: Usar umbral de delta desde BD en lugar de hardcoded
       const events: string[] = [];
-      if (delta !== null && deltaThreshold !== null && Math.abs(delta) >= deltaThreshold) {
+      // Regla semántica: delta spike solo aplica si el sensor ya está en WARNING o ALERT.
+      // Si el punto está NORMAL (dentro de banda WARNING), NO se marca DELTA_SPIKE.
+      if (
+        delta !== null &&
+        deltaThreshold !== null &&
+        pointState !== SensorTelemetryState.NORMAL &&
+        Math.abs(delta) >= deltaThreshold
+      ) {
         events.push('DELTA_SPIKE');
       }
 
@@ -1130,6 +1147,17 @@ export class MonitoringService {
         thresholds: canonicalThresholds,
         prediction: null, // TODO: integrar predicciones ML si existen
       },
+      mlEvent: latestMlEvent
+        ? {
+            eventId: String(latestMlEvent.eventId),
+            eventType: String(latestMlEvent.eventType),
+            eventCode: String(latestMlEvent.eventCode),
+            title: latestMlEvent.title,
+            message: latestMlEvent.message,
+            createdAt: latestMlEvent.createdAt?.toISOString?.() ?? null,
+            payload: latestMlEvent.payload,
+          }
+        : null,
       trading: {
         sensorId: String(sensorId),
         range,

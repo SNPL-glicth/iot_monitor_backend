@@ -10,6 +10,7 @@ import { Device } from '../entities/device.entity';
 import { Alert } from '../entities/alert.entity';
 import { AlertNotification } from '../entities/alert-notification.entity';
 import { Sensor } from '../entities/sensor.entity';
+import { DataSource } from 'typeorm';
 
 // Pequeña entidad inline para mapear push_tokens sin crear un archivo nuevo grande.
 import { Entity, Column, PrimaryGeneratedColumn, ManyToOne, JoinColumn } from 'typeorm';
@@ -54,6 +55,7 @@ export class NotificationsService {
     private readonly alertNotificationRepo: Repository<AlertNotification>,
     @InjectRepository(Sensor)
     private readonly sensorRepo: Repository<Sensor>,
+    private readonly dataSource: DataSource,
     private readonly http: HttpService,
   ) {}
 
@@ -143,12 +145,64 @@ export class NotificationsService {
     await this.sendFcm(tokens, payload);
   }
 
-  async getUnreadNotifications(limit = 100): Promise<AlertNotification[]> {
-    return this.alertNotificationRepo.find({
-      where: { isRead: false },
-      order: { createdAt: 'DESC' },
-      take: limit,
-    });
+  async getUnreadNotifications(limit = 100): Promise<
+    Array<
+      AlertNotification & {
+        sensorId?: string | null;
+        sensorName?: string | null;
+        deviceName?: string | null;
+      }
+    >
+  > {
+    // alert_notifications es SSOT de read/unread.
+    // Se enriquece con datos de contexto para la UI (campana) sin crear IDs sintéticos.
+    const rows = await this.dataSource.query(
+      `
+      SELECT TOP (@0)
+        n.id,
+        n.source,
+        n.source_event_id AS sourceEventId,
+        n.severity,
+        n.title,
+        n.message,
+        n.is_read AS isRead,
+        n.created_at AS createdAt,
+        COALESCE(a.sensor_id, me.sensor_id) AS sensorId,
+        COALESCE(s1.name, s2.name) AS sensorName,
+        COALESCE(d1.name, d2.name) AS deviceName
+      FROM dbo.alert_notifications n WITH (NOLOCK)
+      LEFT JOIN dbo.alerts a WITH (NOLOCK)
+        ON n.source = 'alert' AND a.id = n.source_event_id
+      LEFT JOIN dbo.ml_events me WITH (NOLOCK)
+        ON n.source = 'ml_event' AND me.id = n.source_event_id
+      LEFT JOIN dbo.sensors s1 WITH (NOLOCK)
+        ON s1.id = a.sensor_id
+      LEFT JOIN dbo.sensors s2 WITH (NOLOCK)
+        ON s2.id = me.sensor_id
+      LEFT JOIN dbo.devices d1 WITH (NOLOCK)
+        ON d1.id = a.device_id
+      LEFT JOIN dbo.devices d2 WITH (NOLOCK)
+        ON d2.id = me.device_id
+      WHERE n.is_read = 0
+      ORDER BY n.created_at DESC
+      `,
+      [limit],
+    );
+
+    return (rows ?? []).map((r: any) => ({
+      id: String(r.id),
+      source: String(r.source ?? ''),
+      sourceEventId: r.sourceEventId !== null && r.sourceEventId !== undefined ? String(r.sourceEventId) : null,
+      severity: String(r.severity ?? ''),
+      title: String(r.title ?? ''),
+      message: r.message !== null && r.message !== undefined ? String(r.message) : null,
+      isRead: Boolean(r.isRead),
+      createdAt: r.createdAt,
+      readAt: null,
+      sensorId: r.sensorId !== null && r.sensorId !== undefined ? String(r.sensorId) : null,
+      sensorName: r.sensorName !== null && r.sensorName !== undefined ? String(r.sensorName) : null,
+      deviceName: r.deviceName !== null && r.deviceName !== undefined ? String(r.deviceName) : null,
+    }));
   }
 
   async markNotificationsAsRead(ids: string[]): Promise<void> {

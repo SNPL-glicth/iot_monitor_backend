@@ -31,6 +31,9 @@ export class NotificationsController {
       severity: n.severity,
       title: n.title,
       message: n.message,
+      sensorId: (n as any).sensorId ?? null,
+      sensorName: (n as any).sensorName ?? null,
+      deviceName: (n as any).deviceName ?? null,
       createdAt: n.createdAt,
       isRead: n.isRead,
     }));
