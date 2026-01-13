@@ -213,28 +213,47 @@ export class MonitoringService {
 
   /**
    * Devuelve las últimas predicciones generadas por modelos ML.
+   * TAREA 2: Solo devuelve la predicción más reciente por sensor (deduplicación).
    */
   async getLatestPredictions(limit = 50) {
-    const rows = await this.predictionRepo
-      .createQueryBuilder('p')
-      .leftJoinAndSelect('p.model', 'model')
-      .leftJoinAndSelect('p.sensor', 'sensor')
-      .leftJoinAndSelect('sensor.device', 'device')
-      .orderBy('p.targetTimestamp', 'ASC')
-      .limit(limit)
-      .getMany();
+    // Query con ROW_NUMBER para obtener solo la predicción más reciente por sensor
+    const rows = await this.dataSource.query(`
+      WITH RankedPredictions AS (
+        SELECT 
+          p.id,
+          p.predicted_value,
+          p.confidence,
+          p.predicted_at,
+          p.target_timestamp,
+          p.sensor_id,
+          p.model_id,
+          s.name AS sensor_name,
+          s.unit,
+          d.name AS device_name,
+          m.model_name,
+          m.version AS model_version,
+          ROW_NUMBER() OVER (PARTITION BY p.sensor_id ORDER BY p.predicted_at DESC) as rn
+        FROM predictions p
+        INNER JOIN sensors s ON p.sensor_id = s.id
+        LEFT JOIN devices d ON s.device_id = d.id
+        LEFT JOIN ml_models m ON p.model_id = m.id
+        WHERE p.target_timestamp > GETDATE()
+      )
+      SELECT TOP (@0) * FROM RankedPredictions WHERE rn = 1
+      ORDER BY target_timestamp ASC
+    `, [limit]);
 
-    return rows.map((p) => ({
+    return rows.map((p: any) => ({
       id: p.id,
-      predictedValue: p.predictedValue,
+      predictedValue: p.predicted_value,
       confidence: p.confidence,
-      predictedAt: this.formatDateTime(p.predictedAt),
-      targetTimestamp: this.formatDateTime(p.targetTimestamp),
-      sensorName: p.sensor.name,
-      unit: p.sensor.unit,
-      deviceName: p.sensor.device?.name ?? '',
-      modelName: p.model.modelName,
-      modelVersion: p.model.version,
+      predictedAt: this.formatDateTime(p.predicted_at),
+      targetTimestamp: this.formatDateTime(p.target_timestamp),
+      sensorName: p.sensor_name,
+      unit: p.unit,
+      deviceName: p.device_name ?? '',
+      modelName: p.model_name,
+      modelVersion: p.model_version,
     }));
   }
 

@@ -9,6 +9,7 @@ import { Device } from '../entities/device.entity';
 import { Alert } from '../entities/alert.entity';
 import { User } from '../entities/user.entity';
 import { AlertNotification } from '../entities/alert-notification.entity';
+import { Sensor } from '../entities/sensor.entity';
 import { Entity, Column, PrimaryGeneratedColumn, ManyToOne, JoinColumn } from 'typeorm';
 
 @Entity('push_tokens')
@@ -36,7 +37,7 @@ class PushToken {
 @Module({
   imports: [
     HttpModule,
-    TypeOrmModule.forFeature([PushToken, UserDevice, Device, Alert, User, AlertNotification]),
+    TypeOrmModule.forFeature([PushToken, UserDevice, Device, Alert, User, AlertNotification, Sensor]),
   ],
   controllers: [NotificationsController],
   providers: [NotificationsService],
