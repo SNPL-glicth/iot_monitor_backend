@@ -74,6 +74,58 @@ type MlEventsQuery = PageQuery & {
   to?: string;
 };
 
+// FIX FASE 3.2: Cache en memoria para reducir queries a BD
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+  ttlMs: number;
+}
+
+class InMemoryCache {
+  private cache = new Map<string, CacheEntry<any>>();
+  
+  get<T>(key: string): T | null {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > entry.ttlMs) {
+      this.cache.delete(key);
+      return null;
+    }
+    return entry.data as T;
+  }
+  
+  set<T>(key: string, data: T, ttlMs: number): void {
+    this.cache.set(key, { data, timestamp: Date.now(), ttlMs });
+  }
+  
+  invalidate(key: string): void {
+    this.cache.delete(key);
+  }
+  
+  invalidatePattern(pattern: string): void {
+    for (const key of this.cache.keys()) {
+      if (key.includes(pattern)) {
+        this.cache.delete(key);
+      }
+    }
+  }
+  
+  clear(): void {
+    this.cache.clear();
+  }
+}
+
+// Cache singleton compartido
+const crmCache = new InMemoryCache();
+
+// TTLs configurables
+const CACHE_TTL = {
+  DASHBOARD: 30_000,      // 30 segundos
+  BADGE: 30_000,          // 30 segundos  
+  DEVICE_LIST: 60_000,    // 1 minuto
+  ML_EVENTS: 20_000,      // 20 segundos
+};
+
 @Injectable()
 export class CrmService {
   constructor(
@@ -898,11 +950,35 @@ export class CrmService {
   }
 
   async getMlEventsBadge(ctx: AuthCtx) {
-    // Por ahora todos los roles ven todos los eventos ML activos.
+    // FIX FASE 3.2: Usar cache para badge (reduce queries COUNT(*))
+    const cacheKey = 'badge:ml_events';
+    const cached = crmCache.get<{ totalActiveMlEvents: number }>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    
     const total = await this.withReadUncommittedRetry(async (manager) =>
       manager.getRepository(MlEventActiveView).count(),
     );
-    return { totalActiveMlEvents: total };
+    const result = { totalActiveMlEvents: total };
+    
+    // Guardar en cache
+    crmCache.set(cacheKey, result, CACHE_TTL.BADGE);
+    
+    return result;
+  }
+  
+  // FIX FASE 3.2: Método para invalidar cache (llamar cuando hay cambios)
+  invalidateBadgeCache(): void {
+    crmCache.invalidate('badge:ml_events');
+  }
+  
+  invalidateDashboardCache(): void {
+    crmCache.invalidatePattern('dashboard:');
+  }
+  
+  invalidateAllCache(): void {
+    crmCache.clear();
   }
 
   async listMlEvents(query: MlEventsQuery, ctx: AuthCtx) {
