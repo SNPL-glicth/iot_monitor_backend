@@ -39,8 +39,23 @@ export const SensorFinalState = {
   UNKNOWN: 'unknown',
 } as const;
 
-/** Umbral para considerar un sensor como STALE (sin datos recientes) */
-export const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 horas
+/**
+ * @deprecated ARQUITECTURA DATA-DRIVEN: Este valor ya no se usa.
+ * 
+ * El umbral de STALE ahora viene de la configuración del sensor:
+ * - Tabla: sensor_threshold_profiles
+ * - Columna: stale_threshold_ms
+ * - Default: 86400000 (24 horas)
+ * 
+ * Cada sensor puede definir su propio umbral según su naturaleza:
+ * - Sensores críticos: 5 minutos (300000 ms)
+ * - Sensores estándar: 1 hora (3600000 ms)
+ * - Sensores de baja frecuencia: 24 horas (86400000 ms)
+ * 
+ * Esta constante se mantiene solo para referencia y compatibilidad.
+ * NO debe usarse en código nuevo.
+ */
+export const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 horas - DEPRECADO
 
 export type SensorFinalStateType = typeof SensorFinalState[keyof typeof SensorFinalState];
 

@@ -8,7 +8,6 @@ import {
   SensorTelemetryState,
   SensorFinalState,
   evaluateTelemetryState,
-  STALE_THRESHOLD_MS,
 } from '../common/sensor-states';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
@@ -65,30 +64,22 @@ export class MonitoringService {
     return null;
   }
 
-  private getLimitBounds(sensorType: string, unit: string): { min: number; max: number } {
-    const t = (sensorType || '').toLowerCase().trim();
-    const u = (unit || '').toLowerCase().trim();
-
-    // Rangos “realistas” (ajústalos a tu dominio). La idea es frenar inputs absurdos
-    // que luego rompan reportes / reglas / SPs o generen ruido.
-    if (t === 'temperature' || u.includes('°c') || u === 'c') {
-      return { min: -50, max: 150 };
-    }
-    if (t === 'humidity' || u === '%') {
-      return { min: 0, max: 100 };
-    }
-    if (t === 'air_quality' || u === 'ppm') {
-      return { min: 0, max: 5000 };
-    }
-    if (t === 'voltage' || u === 'v' || u.includes('volt')) {
-      return { min: 0, max: 600 };
-    }
-    if (t === 'power' || u === 'w' || u === 'kw') {
-      return { min: 0, max: 100000 };
-    }
-
-    // Default: rango amplio (pero no infinito)
-    return { min: -1000000000, max: 1000000000 };
+  /**
+   * ARQUITECTURA DATA-DRIVEN: Obtiene límites de validación para un sensor.
+   * 
+   * Esta función es para VALIDACIÓN DE ENTRADA (evitar valores absurdos),
+   * NO para evaluación de alertas/warnings.
+   * 
+   * TODO: Migrar a configuración en BD por sensor (sensor_validation_bounds).
+   * Por ahora usa un rango muy amplio como fallback seguro.
+   * 
+   * El backend NO interpreta qué significa el valor, solo valida que sea finito.
+   */
+  private getLimitBounds(_sensorType: string, _unit: string): { min: number; max: number } {
+    // ARQUITECTURA: No hardcodear por tipo de sensor
+    // Usar rango amplio que permita cualquier tipo de métrica
+    // La validación semántica la hace la configuración del sensor
+    return { min: -1e12, max: 1e12 };
   }
 
   private validateLimitPayload(args: {
@@ -526,7 +517,7 @@ export class MonitoringService {
   async getSensorConsolidatedStatus(sensorId: number) {
     const sensor = await this.sensorRepo.findOne({
       where: { id: String(sensorId) },
-      relations: ['device'],
+      relations: ['device', 'thresholdProfile'],
     });
     if (!sensor) {
       throw new NotFoundException('Sensor no encontrado');
@@ -589,11 +580,17 @@ export class MonitoringService {
       predictionWouldBreach = predState !== SensorTelemetryState.NORMAL;
     }
 
-    // AUDITORIA 3.6: Detectar sensor STALE (sin datos recientes)
+    // ARQUITECTURA DATA-DRIVEN: Detectar sensor STALE usando umbral configurable por sensor
+    // El umbral viene del perfil del sensor, con fallback a 24h para compatibilidad
+    const DEFAULT_STALE_THRESHOLD_MS = 86400000; // 24 horas (fallback)
+    const staleThresholdMs = sensor.thresholdProfile?.staleThresholdMs
+      ? Number(sensor.thresholdProfile.staleThresholdMs)
+      : DEFAULT_STALE_THRESHOLD_MS;
+    
     const now = new Date();
     const lastReadingTime = latestReading?.timestamp ? new Date(latestReading.timestamp).getTime() : 0;
     const timeSinceLastReading = now.getTime() - lastReadingTime;
-    const isStale = lastReadingTime === 0 || timeSinceLastReading > STALE_THRESHOLD_MS;
+    const isStale = lastReadingTime === 0 || timeSinceLastReading > staleThresholdMs;
 
     // Calcular estado final con prioridad: STALE > ALERT > WARNING > PREDICTION > NORMAL
     let finalState: string;
@@ -978,14 +975,25 @@ export class MonitoringService {
   }
 
   /**
-   * INC-05: Obtiene el umbral de delta absoluto desde la tabla delta_thresholds.
-   * Retorna null si no hay umbral configurado (fallback: no detectar spikes).
+   * ARQUITECTURA DATA-DRIVEN: Obtiene política de delta desde configuración del sensor.
+   * 
+   * El backend es AGNÓSTICO al dominio:
+   * - NO interpreta qué tipo de sensor es
+   * - NO asume unidades ni rangos
+   * - NO tiene lógica por tipo de métrica
+   * 
+   * TODO viene de la configuración del sensor en BD:
+   * - delta_thresholds: umbral absoluto configurado por sensor
+   * - sensor_policies: política de evaluación (futuro: z-score, percentil, etc.)
+   * 
+   * Si no hay configuración → NO detectar spikes (fail-safe)
    * 
    * @param sensorId - ID del sensor
-   * @returns Umbral absoluto de delta o null
+   * @returns Umbral absoluto de delta desde BD, o null si no está configurado
    */
   private async getDeltaThresholdForSensor(sensorId: number): Promise<number | null> {
     try {
+      // ÚNICA fuente: configuración específica del sensor en BD
       const result = await this.dataSource.query(
         `SELECT TOP 1 abs_delta 
          FROM dbo.delta_thresholds 
@@ -997,9 +1005,12 @@ export class MonitoringService {
       if (result && result.length > 0 && result[0].abs_delta !== null) {
         return Number(result[0].abs_delta);
       }
+      
+      // Sin configuración → NO detectar spikes
+      // El administrador debe configurar umbrales para cada sensor
       return null;
     } catch {
-      // Si la tabla no existe o hay error, retornar null (no detectar spikes)
+      // Error de BD → fail-safe, no detectar spikes
       return null;
     }
   }
@@ -1097,7 +1108,8 @@ export class MonitoringService {
       .limit(1)
       .getOne();
 
-    // Obtener umbral de delta desde BD (INC-05: evitar hardcoded)
+    // Obtener umbral de delta desde BD (DATA-DRIVEN: sin hardcoded)
+    // El umbral viene SOLO de la configuración del sensor, no del tipo
     const deltaThreshold = await this.getDeltaThresholdForSensor(sensorId);
 
     // Construir series para trading chart
@@ -1121,12 +1133,22 @@ export class MonitoringService {
 
       // INC-05: Usar umbral de delta desde BD en lugar de hardcoded
       const events: string[] = [];
-      // Regla semántica: delta spike solo aplica si el sensor ya está en WARNING o ALERT.
-      // Si el punto está NORMAL (dentro de banda WARNING), NO se marca DELTA_SPIKE.
+      // FIX SEMÁNTICO: Delta Spike tiene MENOR prioridad que ALERT/WARNING.
+      // Reglas de prioridad: ALERT > WARNING > DELTA_SPIKE > ML
+      // 
+      // Delta Spike SOLO se marca si:
+      // 1. El punto está en WARNING (no ALERT - las alertas son más importantes)
+      // 2. El delta supera el umbral configurado
+      // 3. NO hay una alerta activa (ALERT suprime DELTA_SPIKE)
+      //
+      // Si el punto está en ALERT, NO marcamos DELTA_SPIKE porque:
+      // - La alerta ya indica un problema crítico
+      // - Mostrar ambos confunde al usuario
+      // - DELTA_SPIKE es informativo, no crítico
       if (
         delta !== null &&
         deltaThreshold !== null &&
-        pointState !== SensorTelemetryState.NORMAL &&
+        pointState === SensorTelemetryState.WARNING && // Solo WARNING, no ALERT
         Math.abs(delta) >= deltaThreshold
       ) {
         events.push('DELTA_SPIKE');

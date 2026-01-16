@@ -1,23 +1,29 @@
 /**
  * Guard rails para validación de datos en el backend.
  * 
- * FASE 3: Validaciones explícitas para rechazo temprano de datos inválidos.
+ * ARQUITECTURA DATA-DRIVEN:
+ * - El backend es AGNÓSTICO al dominio
+ * - NO interpreta qué tipo de sensor es
+ * - NO asume rangos físicos por tipo
+ * - Solo valida que los valores sean finitos y razonables
+ * 
+ * Los rangos específicos deben venir de la configuración del sensor en BD.
  */
 
 import { BadRequestException } from '@nestjs/common';
 
 /**
- * Rangos físicos absolutos por tipo de sensor.
- * Valores fuera de estos rangos son físicamente imposibles.
+ * DEPRECADO: Los rangos físicos por tipo de sensor violan la arquitectura data-driven.
+ * 
+ * TODO: Migrar a configuración en BD por sensor (sensor_validation_config).
+ * Por ahora, el backend acepta cualquier valor finito y deja que la
+ * configuración del sensor defina los límites válidos.
+ * 
+ * Este objeto se mantiene vacío para compatibilidad, pero NO se usa.
  */
 const PHYSICAL_LIMITS: Record<string, { min: number; max: number; unit: string }> = {
-  temperature: { min: -100, max: 500, unit: '°C' },
-  humidity: { min: 0, max: 100, unit: '%' },
-  pressure: { min: 0, max: 2000, unit: 'hPa' },
-  air_quality: { min: 0, max: 10000, unit: 'ppm' },
-  voltage: { min: 0, max: 1000, unit: 'V' },
-  power: { min: 0, max: 1000000, unit: 'W' },
-  ph: { min: 0, max: 14, unit: 'pH' },
+  // ARQUITECTURA: No hardcodear límites por tipo de sensor
+  // Los límites vienen de la configuración del sensor en BD
 };
 
 /**
