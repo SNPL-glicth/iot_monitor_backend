@@ -181,6 +181,7 @@ export class MonitoringService {
 
   /**
    * Devuelve alertas activas/acknowledged (vista v_active_alerts)
+   * FIX: Incluye sensor_id y device_id para navegación en Flutter
    */
   async getActiveAlerts(limit = 100) {
     const rows = await this.activeAlertViewRepo
@@ -190,6 +191,10 @@ export class MonitoringService {
       .getMany();
     return rows.map((row) => ({
       ...row,
+      sensorId: row.sensorId,
+      deviceId: row.deviceId,
+      thresholdName: row.thresholdName ?? 'Alerta de umbral',
+      conditionType: row.conditionType ?? 'unknown',
       triggeredAt: this.formatDateTime(row.triggeredAt ?? null),
     }));
   }

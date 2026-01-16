@@ -47,6 +47,12 @@ export class ActiveAlertView {
   @ViewColumn({ name: 'alert_id' })
   alertId!: string;
 
+  @ViewColumn({ name: 'sensor_id' })
+  sensorId!: string;
+
+  @ViewColumn({ name: 'device_id' })
+  deviceId!: string;
+
   @ViewColumn()
   severity!: string;
 
@@ -75,10 +81,10 @@ export class ActiveAlertView {
   unit!: string;
 
   @ViewColumn({ name: 'threshold_name' })
-  thresholdName!: string;
+  thresholdName!: string | null;
 
   @ViewColumn({ name: 'condition_type' })
-  conditionType!: string;
+  conditionType!: string | null;
 
   @ViewColumn({ name: 'threshold_value_min' })
   thresholdValueMin!: string | null;
@@ -201,13 +207,13 @@ export class AlertsHistoryView {
   unit!: string;
 
   @ViewColumn({ name: 'threshold_id' })
-  thresholdId!: string;
+  thresholdId!: string | null;
 
   @ViewColumn({ name: 'threshold_name' })
-  thresholdName!: string;
+  thresholdName!: string | null;
 
   @ViewColumn({ name: 'condition_type' })
-  conditionType!: string;
+  conditionType!: string | null;
 
   @ViewColumn({ name: 'threshold_value_min' })
   thresholdValueMin!: string | null;

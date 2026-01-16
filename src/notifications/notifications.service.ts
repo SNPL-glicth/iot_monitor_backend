@@ -145,6 +145,19 @@ export class NotificationsService {
     await this.sendFcm(tokens, payload);
   }
 
+  /**
+   * Obtiene notificaciones no leídas con prioridad correcta.
+   * 
+   * SSOT = alert_notifications (DB)
+   * 
+   * PRIORIDAD (ORDER BY):
+   * 1. source = 'alert' primero (alertas físicas > ML)
+   * 2. severity = 'critical' > 'warning' > otros
+   * 3. created_at DESC (más reciente primero)
+   * 
+   * REGLA DE SUPRESIÓN:
+   * Si hay alertas activas para un sensor, NO mostrar ML events de ese sensor.
+   */
   async getUnreadNotifications(limit = 100): Promise<
     Array<
       AlertNotification & {
@@ -154,10 +167,15 @@ export class NotificationsService {
       }
     >
   > {
-    // alert_notifications es SSOT de read/unread.
-    // Se enriquece con datos de contexto para la UI (campana) sin crear IDs sintéticos.
     const rows = await this.dataSource.query(
       `
+      WITH SensorsWithActiveAlerts AS (
+        -- Sensores que tienen alertas activas no leídas
+        SELECT DISTINCT a.sensor_id
+        FROM dbo.alert_notifications n
+        INNER JOIN dbo.alerts a ON n.source = 'alert' AND a.id = n.source_event_id
+        WHERE n.is_read = 0
+      )
       SELECT TOP (@0)
         n.id,
         n.source,
@@ -169,7 +187,15 @@ export class NotificationsService {
         n.created_at AS createdAt,
         COALESCE(a.sensor_id, me.sensor_id) AS sensorId,
         COALESCE(s1.name, s2.name) AS sensorName,
-        COALESCE(d1.name, d2.name) AS deviceName
+        COALESCE(d1.name, d2.name) AS deviceName,
+        -- Prioridad calculada para ORDER BY
+        CASE 
+          WHEN n.source = 'alert' AND n.severity = 'critical' THEN 0
+          WHEN n.source = 'alert' AND n.severity = 'warning' THEN 1
+          WHEN n.source = 'alert' THEN 2
+          WHEN n.source = 'ml_event' THEN 10
+          ELSE 20
+        END AS priority
       FROM dbo.alert_notifications n WITH (NOLOCK)
       LEFT JOIN dbo.alerts a WITH (NOLOCK)
         ON n.source = 'alert' AND a.id = n.source_event_id
@@ -184,7 +210,12 @@ export class NotificationsService {
       LEFT JOIN dbo.devices d2 WITH (NOLOCK)
         ON d2.id = me.device_id
       WHERE n.is_read = 0
-      ORDER BY n.created_at DESC
+        -- REGLA DE SUPRESIÓN: No mostrar ML events si hay alertas activas para el mismo sensor
+        AND NOT (
+          n.source = 'ml_event' 
+          AND me.sensor_id IN (SELECT sensor_id FROM SensorsWithActiveAlerts)
+        )
+      ORDER BY priority ASC, n.created_at DESC
       `,
       [limit],
     );
@@ -208,13 +239,33 @@ export class NotificationsService {
   async markNotificationsAsRead(ids: string[]): Promise<void> {
     if (!ids.length) return;
 
+    this.logger.log(`markNotificationsAsRead: marking ${ids.length} notifications as read`);
+    this.logger.debug(`IDs to mark: ${ids.slice(0, 5).join(', ')}${ids.length > 5 ? '...' : ''}`);
+
     const now = new Date();
-    await this.alertNotificationRepo
-      .createQueryBuilder()
-      .update(AlertNotification)
-      .set({ isRead: true, readAt: now })
-      .where('id IN (:...ids)', { ids })
-      .execute();
+    
+    // Convertir IDs a números para evitar problemas de tipo con BIGINT
+    const numericIds = ids.map(id => parseInt(id, 10)).filter(id => !isNaN(id));
+    
+    if (numericIds.length === 0) {
+      this.logger.warn('markNotificationsAsRead: no valid numeric IDs provided');
+      return;
+    }
+
+    try {
+      // Usar query raw para evitar problemas de tipo con TypeORM
+      const result = await this.dataSource.query(
+        `UPDATE dbo.alert_notifications 
+         SET is_read = 1, read_at = @0 
+         WHERE id IN (${numericIds.join(',')})`,
+        [now],
+      );
+      
+      this.logger.log(`markNotificationsAsRead: updated ${result?.rowsAffected ?? 'unknown'} rows`);
+    } catch (error) {
+      this.logger.error(`markNotificationsAsRead error: ${error}`);
+      throw error;
+    }
   }
 
   private async sendFcm(tokens: string[], payload: AlertPushPayload): Promise<void> {
