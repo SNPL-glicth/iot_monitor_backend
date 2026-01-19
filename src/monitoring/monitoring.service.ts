@@ -1133,32 +1133,35 @@ export class MonitoringService {
 
       // INC-05: Usar umbral de delta desde BD en lugar de hardcoded
       const events: string[] = [];
-      // FIX SEMÁNTICO: Delta Spike tiene MENOR prioridad que ALERT/WARNING.
-      // Reglas de prioridad: ALERT > WARNING > DELTA_SPIKE > ML
-      // 
-      // Delta Spike SOLO se marca si:
-      // 1. El punto está en WARNING (no ALERT - las alertas son más importantes)
-      // 2. El delta supera el umbral configurado
-      // 3. NO hay una alerta activa (ALERT suprime DELTA_SPIKE)
+      // FIX COHERENCIA GRÁFICA CONGELADA: El estado del punto debe reflejar
+      // si hubo un delta spike, para que la gráfica congelada sea coherente
+      // con las advertencias generadas por la ingesta.
       //
-      // Si el punto está en ALERT, NO marcamos DELTA_SPIKE porque:
-      // - La alerta ya indica un problema crítico
-      // - Mostrar ambos confunde al usuario
-      // - DELTA_SPIKE es informativo, no crítico
-      if (
-        delta !== null &&
+      // Reglas de prioridad: ALERT > WARNING (umbral) > WARNING (delta spike) > NORMAL
+      //
+      // Si el punto está en ALERT por umbral, mantener ALERT.
+      // Si el punto está en WARNING por umbral, mantener WARNING.
+      // Si el punto está en NORMAL pero tiene delta spike, marcar como WARNING.
+      let finalState = pointState;
+      
+      const hasDeltaSpike = delta !== null &&
         deltaThreshold !== null &&
-        pointState === SensorTelemetryState.WARNING && // Solo WARNING, no ALERT
-        Math.abs(delta) >= deltaThreshold
-      ) {
+        Math.abs(delta) >= deltaThreshold;
+      
+      if (hasDeltaSpike) {
         events.push('DELTA_SPIKE');
+        // FIX COHERENCIA: Si el punto está NORMAL pero tiene delta spike,
+        // marcarlo como WARNING para coherencia con la ingesta
+        if (pointState === SensorTelemetryState.NORMAL) {
+          finalState = SensorTelemetryState.WARNING;
+        }
       }
 
       return {
         timestamp: r.timestamp.toISOString(),
         readingTimestamp: r.timestamp.toISOString(),
         value,
-        state: pointState,
+        state: finalState,
         delta,
         events,
       };

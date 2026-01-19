@@ -546,42 +546,50 @@ export class CrmService {
   async acknowledgeAlert(alertId: number, ctx: AuthCtx) {
     this.requireUserId(ctx);
 
-    const row = await this.alertRepo.findOne({ where: { id: String(alertId) } });
-    if (!row) throw new NotFoundException('Alerta no encontrada');
+    // FIX DEADLOCK: Usar retry con READ UNCOMMITTED para evitar deadlocks
+    // El error 1205 ocurre cuando hay contención con el proceso de ingesta
+    return this.withReadUncommittedRetry(async (manager) => {
+      const row = await manager.findOne(Alert, { where: { id: String(alertId) } });
+      if (!row) throw new NotFoundException('Alerta no encontrada');
 
-    await this.assertDeviceWriteAccess(Number(row.deviceId), ctx);
+      await this.assertDeviceWriteAccess(Number(row.deviceId), ctx);
 
-    if (row.status === 'resolved') {
-      return { success: true, status: row.status };
-    }
+      if (row.status === 'resolved') {
+        return { success: true, status: row.status };
+      }
 
-    row.status = 'acknowledged';
-    row.acknowledgedAt = new Date();
-    row.acknowledgedById = ctx.userId;
+      row.status = 'acknowledged';
+      row.acknowledgedAt = new Date();
+      row.acknowledgedById = ctx.userId;
 
-    await this.alertRepo.save(row);
-    return { success: true };
+      await manager.save(row);
+      return { success: true };
+    }, { retries: 3, baseDelayMs: 50 });
   }
 
   async resolveAlert(alertId: number, ctx: AuthCtx) {
     this.requireUserId(ctx);
 
-    const row = await this.alertRepo.findOne({ where: { id: String(alertId) } });
-    if (!row) throw new NotFoundException('Alerta no encontrada');
+    // FIX DEADLOCK: Usar retry con READ UNCOMMITTED para evitar deadlocks
+    // El error 1205 ocurre cuando hay contención con el proceso de ingesta
+    return this.withReadUncommittedRetry(async (manager) => {
+      const row = await manager.findOne(Alert, { where: { id: String(alertId) } });
+      if (!row) throw new NotFoundException('Alerta no encontrada');
 
-    await this.assertDeviceWriteAccess(Number(row.deviceId), ctx);
+      await this.assertDeviceWriteAccess(Number(row.deviceId), ctx);
 
-    if (!row.acknowledgedAt) {
-      row.acknowledgedAt = new Date();
-      row.acknowledgedById = ctx.userId;
-    }
+      if (!row.acknowledgedAt) {
+        row.acknowledgedAt = new Date();
+        row.acknowledgedById = ctx.userId;
+      }
 
-    row.status = 'resolved';
-    row.resolvedAt = new Date();
-    row.resolvedById = ctx.userId;
+      row.status = 'resolved';
+      row.resolvedAt = new Date();
+      row.resolvedById = ctx.userId;
 
-    await this.alertRepo.save(row);
-    return { success: true };
+      await manager.save(row);
+      return { success: true };
+    }, { retries: 3, baseDelayMs: 50 });
   }
 
   private chooseBucket(from: Date, to: Date, maxPoints: number): '1m' | '5m' | '1h' {
