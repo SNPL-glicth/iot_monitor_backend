@@ -119,6 +119,46 @@ export class Sensor {
   @Column({ name: 'is_active', type: 'bit', default: true })
   isActive!: boolean;
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // ESTADO OPERACIONAL AUTORITATIVO (SSOT)
+  // ══════════════════════════════════════════════════════════════════════════
+  // Fuente única de verdad para el estado del sensor.
+  // NO inferir desde alertas/warnings - usar este campo directamente.
+
+  /**
+   * Estado operacional del sensor:
+   * - INITIALIZING: Sensor en warm-up, no puede generar eventos
+   * - NORMAL: Operando normalmente, puede generar WARNING/ALERT
+   * - WARNING: Delta spike activo
+   * - ALERT: Violación de umbral activa
+   * - STALE: Sin lecturas recientes
+   */
+  @Column({ 
+    name: 'operational_state', 
+    type: 'varchar', 
+    length: 20, 
+    default: 'INITIALIZING' 
+  })
+  operationalState!: 'INITIALIZING' | 'NORMAL' | 'WARNING' | 'ALERT' | 'STALE';
+
+  /**
+   * Contador de lecturas válidas consecutivas (para warm-up)
+   */
+  @Column({ name: 'valid_readings_count', type: 'int', default: 0 })
+  validReadingsCount!: number;
+
+  /**
+   * Mínimo de lecturas requeridas para transicionar a NORMAL
+   */
+  @Column({ name: 'min_readings_for_normal', type: 'int', default: 3 })
+  minReadingsForNormal!: number;
+
+  /**
+   * Timestamp de la última transición de estado
+   */
+  @Column({ name: 'state_changed_at', type: 'datetime2', nullable: true })
+  stateChangedAt?: Date | null;
+
   @Column({ name: 'created_at', type: 'datetime2' })
   createdAt!: Date;
 

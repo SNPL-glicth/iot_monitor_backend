@@ -155,8 +155,9 @@ export class NotificationsService {
    * 2. severity = 'critical' > 'warning' > otros
    * 3. created_at DESC (más reciente primero)
    * 
-   * REGLA DE SUPRESIÓN:
-   * Si hay alertas activas para un sensor, NO mostrar ML events de ese sensor.
+   * REGLAS DE SUPRESIÓN:
+   * 1. Si hay alertas activas para un sensor, NO mostrar ML events de ese sensor.
+   * 2. NO mostrar notificaciones de sensores en INITIALIZING o STALE (no pueden generar eventos).
    */
   async getUnreadNotifications(limit = 100): Promise<
     Array<
@@ -175,6 +176,14 @@ export class NotificationsService {
         FROM dbo.alert_notifications n
         INNER JOIN dbo.alerts a ON n.source = 'alert' AND a.id = n.source_event_id
         WHERE n.is_read = 0
+      ),
+      SensorsCanGenerateEvents AS (
+        -- SSOT: Solo sensores en estado que permite generar eventos
+        -- INITIALIZING y STALE NO pueden generar eventos
+        SELECT id AS sensor_id
+        FROM dbo.sensors
+        WHERE operational_state IN ('NORMAL', 'WARNING', 'ALERT')
+           OR operational_state IS NULL  -- Fallback para sensores sin migración
       )
       SELECT TOP (@0)
         n.id,
@@ -188,6 +197,7 @@ export class NotificationsService {
         COALESCE(a.sensor_id, me.sensor_id) AS sensorId,
         COALESCE(s1.name, s2.name) AS sensorName,
         COALESCE(d1.name, d2.name) AS deviceName,
+        COALESCE(s1.operational_state, s2.operational_state) AS operationalState,
         -- Prioridad calculada para ORDER BY
         CASE 
           WHEN n.source = 'alert' AND n.severity = 'critical' THEN 0
@@ -210,10 +220,16 @@ export class NotificationsService {
       LEFT JOIN dbo.devices d2 WITH (NOLOCK)
         ON d2.id = me.device_id
       WHERE n.is_read = 0
-        -- REGLA DE SUPRESIÓN: No mostrar ML events si hay alertas activas para el mismo sensor
+        -- REGLA 1: No mostrar ML events si hay alertas activas para el mismo sensor
         AND NOT (
           n.source = 'ml_event' 
           AND me.sensor_id IN (SELECT sensor_id FROM SensorsWithActiveAlerts)
+        )
+        -- REGLA 2: Solo mostrar notificaciones de sensores que pueden generar eventos
+        -- (NORMAL, WARNING, ALERT) - NO mostrar de INITIALIZING o STALE
+        AND (
+          COALESCE(a.sensor_id, me.sensor_id) IN (SELECT sensor_id FROM SensorsCanGenerateEvents)
+          OR COALESCE(a.sensor_id, me.sensor_id) IS NULL  -- Notificaciones sin sensor asociado
         )
       ORDER BY priority ASC, n.created_at DESC
       `,

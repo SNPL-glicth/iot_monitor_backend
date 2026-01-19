@@ -580,30 +580,51 @@ export class MonitoringService {
       predictionWouldBreach = predState !== SensorTelemetryState.NORMAL;
     }
 
-    // ARQUITECTURA DATA-DRIVEN: Detectar sensor STALE usando umbral configurable por sensor
-    // El umbral viene del perfil del sensor, con fallback a 24h para compatibilidad
-    const DEFAULT_STALE_THRESHOLD_MS = 86400000; // 24 horas (fallback)
-    const staleThresholdMs = sensor.thresholdProfile?.staleThresholdMs
-      ? Number(sensor.thresholdProfile.staleThresholdMs)
-      : DEFAULT_STALE_THRESHOLD_MS;
+    // =========================================================================
+    // ESTADO OPERACIONAL AUTORITATIVO (SSOT)
+    // =========================================================================
+    // Usar el estado persistido en BD como fuente única de verdad.
+    // NO inferir desde alertas/warnings - el estado ya fue calculado por ingest.
     
-    const now = new Date();
-    const lastReadingTime = latestReading?.timestamp ? new Date(latestReading.timestamp).getTime() : 0;
-    const timeSinceLastReading = now.getTime() - lastReadingTime;
-    const isStale = lastReadingTime === 0 || timeSinceLastReading > staleThresholdMs;
-
-    // Calcular estado final con prioridad: STALE > ALERT > WARNING > PREDICTION > NORMAL
+    // Mapear operationalState de BD a SensorFinalState para compatibilidad
+    const operationalStateMap: Record<string, string> = {
+      'INITIALIZING': SensorFinalState.UNKNOWN,  // Warm-up, no mostrar eventos
+      'NORMAL': SensorFinalState.NORMAL,
+      'WARNING': SensorFinalState.WARNING,
+      'ALERT': SensorFinalState.ALERT,
+      'STALE': SensorFinalState.STALE,
+    };
+    
+    // Usar estado autoritativo de BD, con fallback a inferencia si no existe
     let finalState: string;
-    if (isStale) {
-      finalState = SensorFinalState.STALE;
-    } else if (activeAlerts.length > 0 || telemetryState === SensorTelemetryState.ALERT) {
-      finalState = SensorFinalState.ALERT;
-    } else if (activeWarnings.length > 0 || telemetryState === SensorTelemetryState.WARNING) {
-      finalState = SensorFinalState.WARNING;
-    } else if (latestPrediction && predictionWouldBreach) {
-      finalState = SensorFinalState.PREDICTION;
+    const authoritativeState = sensor.operationalState;
+    
+    if (authoritativeState && operationalStateMap[authoritativeState]) {
+      // SSOT: Usar estado autoritativo de BD
+      finalState = operationalStateMap[authoritativeState];
     } else {
-      finalState = SensorFinalState.NORMAL;
+      // Fallback: Inferir estado (compatibilidad con sensores sin migración)
+      const DEFAULT_STALE_THRESHOLD_MS = 86400000; // 24 horas
+      const staleThresholdMs = sensor.thresholdProfile?.staleThresholdMs
+        ? Number(sensor.thresholdProfile.staleThresholdMs)
+        : DEFAULT_STALE_THRESHOLD_MS;
+      
+      const now = new Date();
+      const lastReadingTime = latestReading?.timestamp ? new Date(latestReading.timestamp).getTime() : 0;
+      const timeSinceLastReading = now.getTime() - lastReadingTime;
+      const isStale = lastReadingTime === 0 || timeSinceLastReading > staleThresholdMs;
+
+      if (isStale) {
+        finalState = SensorFinalState.STALE;
+      } else if (activeAlerts.length > 0 || telemetryState === SensorTelemetryState.ALERT) {
+        finalState = SensorFinalState.ALERT;
+      } else if (activeWarnings.length > 0 || telemetryState === SensorTelemetryState.WARNING) {
+        finalState = SensorFinalState.WARNING;
+      } else if (latestPrediction && predictionWouldBreach) {
+        finalState = SensorFinalState.PREDICTION;
+      } else {
+        finalState = SensorFinalState.NORMAL;
+      }
     }
 
     // Formatear warning activo para respuesta
@@ -648,6 +669,16 @@ export class MonitoringService {
       alert_active: alertActive,
       warning_active: warningActive,
       prediction_current: predictionCurrent,
+      // =========================================================================
+      // ESTADO OPERACIONAL AUTORITATIVO (expuesto a Flutter)
+      // =========================================================================
+      operational_state: {
+        state: sensor.operationalState ?? 'UNKNOWN',
+        state_since: this.formatDateTime(sensor.stateChangedAt ?? null),
+        valid_readings_count: sensor.validReadingsCount ?? 0,
+        min_readings_for_normal: sensor.minReadingsForNormal ?? 3,
+        can_generate_events: ['NORMAL', 'WARNING', 'ALERT'].includes(sensor.operationalState ?? ''),
+      },
       // Campos adicionales para compatibilidad
       sensorId: sensor.id,
       sensorName: sensor.name,

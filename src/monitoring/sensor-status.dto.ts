@@ -48,10 +48,29 @@ export type CurrentPrediction = {
   target_timestamp: Date;
 };
 
+/**
+ * Estado operacional autoritativo del sensor (SSOT).
+ * Fuente única de verdad - NO inferir desde alertas/warnings.
+ */
+export type OperationalState = {
+  /** Estado actual: INITIALIZING, NORMAL, WARNING, ALERT, STALE */
+  state: 'INITIALIZING' | 'NORMAL' | 'WARNING' | 'ALERT' | 'STALE' | 'UNKNOWN';
+  /** Timestamp de la última transición de estado */
+  state_since: string | null;
+  /** Lecturas válidas consecutivas (para warm-up) */
+  valid_readings_count: number;
+  /** Mínimo de lecturas para transicionar a NORMAL */
+  min_readings_for_normal: number;
+  /** True si el sensor puede generar WARNING/ALERT */
+  can_generate_events: boolean;
+};
+
 export type SensorConsolidatedStatus = {
   sensor_id: number;
   final_state: SensorFinalStateType;
   alert_active: ActiveAlert | null;
   warning_active: ActiveWarning[];
   prediction_current: CurrentPrediction | null;
+  /** Estado operacional autoritativo (SSOT) */
+  operational_state: OperationalState;
 };
