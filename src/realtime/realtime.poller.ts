@@ -54,6 +54,7 @@ export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
   private lastAlertsHash: string | null = null;
   private lastPredictionsHash: string | null = null;
   private lastMlEventsHash: string | null = null;
+  private lastConsolidatedHash: string | null = null;
 
   // FIX: Contador de errores consecutivos para backoff adaptativo
   private consecutiveErrors = 0;
@@ -109,6 +110,7 @@ export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
       let alerts: any[] = [];
       let predictions: any[] = [];
       let mlEvents: any[] = [];
+      let consolidated: any[] = [];
 
       // FIX DEADLOCK: Ejecutar queries secuencialmente con retry, no en paralelo
       // Esto reduce la contención de locks en la BD
@@ -144,6 +146,20 @@ export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`getActiveMlEvents failed: ${String((e as Error)?.message ?? e)}`);
       }
 
+      // PASO 3: Estado consolidado de sensores (SSOT para frontend)
+      // Solo intenta si la vista existe (migración paso3 aplicada)
+      try {
+        consolidated = await withDeadlockRetry(
+          () => this.monitoringService.getAllSensorsConsolidatedStatus(),
+        );
+      } catch (e) {
+        // Silenciar error si la vista no existe (migración pendiente)
+        const msg = String((e as Error)?.message ?? e);
+        if (!msg.includes('No metadata') && !msg.includes('Invalid object name')) {
+          this.logger.warn(`getAllSensorsConsolidatedStatus failed: ${msg}`);
+        }
+      }
+
       const readingsHash = hashJson(latestReadings);
       if (this.lastReadingsHash !== readingsHash) {
         this.lastReadingsHash = readingsHash;
@@ -166,6 +182,13 @@ export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
       if (this.lastMlEventsHash !== mlEventsHash) {
         this.lastMlEventsHash = mlEventsHash;
         this.gateway.broadcast('ml/events/active', mlEvents);
+      }
+
+      // PASO 3: Emitir estado consolidado de sensores
+      const consolidatedHash = hashJson(consolidated);
+      if (this.lastConsolidatedHash !== consolidatedHash) {
+        this.lastConsolidatedHash = consolidatedHash;
+        this.gateway.broadcast('sensors/consolidated', consolidated);
       }
 
       // FIX: Resetear contador de errores en tick exitoso

@@ -149,8 +149,9 @@ export class Sensor {
 
   /**
    * Mínimo de lecturas requeridas para transicionar a NORMAL
+   * FIX: Aumentado a 10 para warm-up adecuado (alineado con SP)
    */
-  @Column({ name: 'min_readings_for_normal', type: 'int', default: 3 })
+  @Column({ name: 'min_readings_for_normal', type: 'int', default: 10 })
   minReadingsForNormal!: number;
 
   /**

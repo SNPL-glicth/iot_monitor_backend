@@ -20,6 +20,7 @@ import {
   AlertsHistoryView,
   LatestSensorReadingView,
   MlEventActiveView,
+  SensorConsolidatedStatusView,
 } from '../entities/views';
 
 @Module({
@@ -40,6 +41,7 @@ import {
       AlertsHistoryView,
       LatestSensorReadingView,
       MlEventActiveView,
+      SensorConsolidatedStatusView,
     ]),
   ],
   controllers: [MonitoringController, SensorStatusController],

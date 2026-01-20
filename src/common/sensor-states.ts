@@ -25,6 +25,8 @@ export type SensorTelemetryStateType = typeof SensorTelemetryState[keyof typeof 
  * Estado consolidado final del sensor (considerando alertas, warnings, predicciones)
  */
 export const SensorFinalState = {
+  /** Sensor en warm-up, acumulando lecturas base - NO genera eventos */
+  INITIALIZING: 'initializing',
   /** Sin alertas ni warnings activos */
   NORMAL: 'normal',
   /** Warning activo (delta spike, predicción de riesgo menor) */
@@ -145,45 +147,18 @@ function evaluateThresholdViolation(
   max: number | null | undefined,
   conditionType: string,
 ): boolean {
-  // Sin umbrales configurados → no hay violación
-  if ((min === null || min === undefined) && (max === null || max === undefined)) {
+  // FIX CRÍTICO: Forzar conversión a número para evitar comparación string vs number
+  const numMin = (min !== null && min !== undefined) ? Number(min) : null;
+  const numMax = (max !== null && max !== undefined) ? Number(max) : null;
+  
+  // Sin umbrales → no hay violación
+  if (numMin === null && numMax === null) {
     return false;
   }
 
-  switch (conditionType) {
-    case 'out_of_range':
-      // Viola si está FUERA del rango [min, max]
-      if (min !== null && min !== undefined && value < min) return true;
-      if (max !== null && max !== undefined && value > max) return true;
-      return false;
-
-    case 'greater_than':
-      // Para greater_than con min y max definidos:
-      // El rango [min, max] define valores NORMALES
-      // Viola si está FUERA de ese rango
-      if (min !== null && min !== undefined && max !== null && max !== undefined) {
-        // Rango normal: [min, max]
-        if (value < min || value > max) return true;
-        return false;
-      }
-      // Solo min definido: viola si valor > min
-      if (min !== null && min !== undefined && value > min) return true;
-      return false;
-
-    case 'less_than':
-      // Viola si valor < min
-      if (min !== null && min !== undefined && value < min) return true;
-      return false;
-
-    case 'equal_to':
-      // Viola si valor == min (exactamente igual)
-      if (min !== null && min !== undefined && value === min) return true;
-      return false;
-
-    default:
-      // Fallback a out_of_range
-      if (min !== null && min !== undefined && value < min) return true;
-      if (max !== null && max !== undefined && value > max) return true;
-      return false;
-  }
+  // Evaluar violación de umbrales (out_of_range por defecto)
+  if (numMin !== null && value < numMin) return true;
+  if (numMax !== null && value > numMax) return true;
+  
+  return false;
 }

@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import {
@@ -11,6 +12,41 @@ import {
 } from '../common/sensor-states';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
+
+/**
+ * FIX DEADLOCK: Detecta si el error es un deadlock de SQL Server (error 1205)
+ */
+function isDeadlockError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const e = err as Record<string, unknown>;
+  const code = e.number ?? e.code ?? '';
+  const message = String(e.message ?? '').toLowerCase();
+  return code === 1205 || code === '1205' || message.includes('deadlock');
+}
+
+/**
+ * FIX DEADLOCK: Ejecuta una operación con retry exponencial para deadlocks
+ */
+async function withDeadlockRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries = 3,
+  baseDelayMs = 100,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastError = e;
+      if (!isDeadlockError(e) || attempt >= maxRetries) {
+        throw e;
+      }
+      const delay = baseDelayMs * Math.pow(2, attempt) + Math.random() * 50;
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastError;
+}
 import { Device } from '../entities/device.entity';
 import { Sensor } from '../entities/sensor.entity';
 import { SensorReading } from '../entities/sensor-reading.entity';
@@ -23,6 +59,7 @@ import {
   ActiveAlertView,
   LatestSensorReadingView,
   MlEventActiveView,
+  SensorConsolidatedStatusView,
 } from '../entities/views';
 
 @Injectable()
@@ -49,6 +86,8 @@ export class MonitoringService {
     private readonly latestSensorReadingViewRepo: Repository<LatestSensorReadingView>,
     @InjectRepository(MlEventActiveView)
     private readonly mlEventActiveViewRepo: Repository<MlEventActiveView>,
+    @InjectRepository(SensorConsolidatedStatusView)
+    private readonly sensorConsolidatedStatusViewRepo: Repository<SensorConsolidatedStatusView>,
     @InjectRepository(Prediction)
     private readonly predictionRepo: Repository<Prediction>,
     private readonly dataSource: DataSource,
@@ -161,9 +200,12 @@ export class MonitoringService {
 
   /**
    * Devuelve las últimas lecturas por sensor (vista v_latest_sensor_readings)
+   * FIX DEADLOCK: Retry automático en caso de deadlock
    */
   async getLatestSensorReadings() {
-    const rows = await this.latestSensorReadingViewRepo.find();
+    const rows = await withDeadlockRetry(() =>
+      this.latestSensorReadingViewRepo.find()
+    );
     return rows.map((row) => ({
       ...row,
       latestTimestamp: this.formatDateTime(row.latestTimestamp ?? null),
@@ -173,13 +215,16 @@ export class MonitoringService {
   /**
    * Devuelve alertas activas/acknowledged (vista v_active_alerts)
    * FIX: Incluye sensor_id y device_id para navegación en Flutter
+   * FIX DEADLOCK: Retry automático en caso de deadlock
    */
   async getActiveAlerts(limit = 100) {
-    const rows = await this.activeAlertViewRepo
-      .createQueryBuilder('a')
-      .orderBy('a.triggeredAt', 'DESC')
-      .limit(limit)
-      .getMany();
+    const rows = await withDeadlockRetry(() =>
+      this.activeAlertViewRepo
+        .createQueryBuilder('a')
+        .orderBy('a.triggeredAt', 'DESC')
+        .limit(limit)
+        .getMany()
+    );
     return rows.map((row) => ({
       ...row,
       sensorId: row.sensorId,
@@ -192,19 +237,49 @@ export class MonitoringService {
 
   /**
    * Devuelve eventos ML activos/acknowledged (vista v_ml_events_active)
+   * FIX DEADLOCK: Retry automático en caso de deadlock
    */
   async getActiveMlEvents(limit = 50) {
-    const rows = await this.mlEventActiveViewRepo
-      .createQueryBuilder('e')
-      .orderBy('e.createdAt', 'DESC')
-      .limit(limit)
-      .getMany();
+    const rows = await withDeadlockRetry(() =>
+      this.mlEventActiveViewRepo
+        .createQueryBuilder('e')
+        .orderBy('e.createdAt', 'DESC')
+        .limit(limit)
+        .getMany()
+    );
 
     return rows.map((row) => ({
       ...row,
       createdAt: this.formatDateTime(row.createdAt ?? null),
       targetTimestamp: this.formatDateTime(row.targetTimestamp ?? null),
     }));
+  }
+
+  /**
+   * Devuelve el estado consolidado de TODOS los sensores.
+   * PASO 3: Vista única con estado final, alertas y warnings activos.
+   * Esta es la fuente de verdad para el frontend en tiempo real.
+   * FIX DEADLOCK: Retry automático en caso de deadlock
+   * FIX: Retorna array vacío si la vista no existe (migración pendiente)
+   */
+  async getAllSensorsConsolidatedStatus() {
+    try {
+      const rows = await withDeadlockRetry(() =>
+        this.sensorConsolidatedStatusViewRepo.find()
+      );
+      return rows.map((row) => ({
+        ...row,
+        latestTimestamp: this.formatDateTime(row.latestTimestamp ?? null),
+        alertTriggeredAt: this.formatDateTime(row.alertTriggeredAt ?? null),
+        warningCreatedAt: this.formatDateTime(row.warningCreatedAt ?? null),
+      }));
+    } catch (e) {
+      const msg = String((e as Error)?.message ?? '');
+      if (msg.includes('No metadata') || msg.includes('Invalid object name')) {
+        return [];
+      }
+      throw e;
+    }
   }
 
   /**
@@ -593,8 +668,9 @@ export class MonitoringService {
     // NO inferir desde alertas/warnings - el estado ya fue calculado por ingest.
     
     // Mapear operationalState de BD a SensorFinalState para compatibilidad
+    // FIX AUDITORIA: Mantener INITIALIZING para que Flutter pueda mostrar warm-up
     const operationalStateMap: Record<string, string> = {
-      'INITIALIZING': SensorFinalState.UNKNOWN,  // Warm-up, no mostrar eventos
+      'INITIALIZING': SensorFinalState.INITIALIZING,  // Warm-up, Flutter muestra indicador
       'NORMAL': SensorFinalState.NORMAL,
       'WARNING': SensorFinalState.WARNING,
       'ALERT': SensorFinalState.ALERT,
@@ -950,6 +1026,73 @@ export class MonitoringService {
         where: { sensor: { id: sensorId } },
       });
       info.alertCount = alertCount;
+
+      // FIX DEBUG: Incluir umbrales para diagnóstico
+      const thresholds = await this.thresholdRepo.find({
+        where: { sensorId: String(sensorId) },
+      });
+      info.thresholds = thresholds.map(t => ({
+        id: t.id,
+        severity: t.severity,
+        conditionType: t.conditionType,
+        min: t.thresholdValueMin,
+        max: t.thresholdValueMax,
+        isActive: t.isActive,
+      }));
+
+      // Última lectura
+      const latestReading = await this.sensorReadingRepo
+        .createQueryBuilder('r')
+        .where('r.sensor_id = :sid', { sid: sensorId })
+        .orderBy('r.timestamp', 'DESC')
+        .limit(1)
+        .getOne();
+      info.latestReading = latestReading ? {
+        value: latestReading.value,
+        timestamp: latestReading.timestamp,
+      } : null;
+
+      // Evaluar estado con umbrales actuales
+      if (latestReading && thresholds.length > 0) {
+        const warningThreshold = thresholds.find((t) => t.severity === 'warning' && t.isActive);
+        const alertThreshold = thresholds.find((t) => t.severity === 'critical' && t.isActive);
+        
+        const value = Number(latestReading.value);
+        info.evaluation = {
+          value,
+          warningThreshold: warningThreshold ? {
+            min: warningThreshold.thresholdValueMin,
+            max: warningThreshold.thresholdValueMax,
+            conditionType: warningThreshold.conditionType,
+          } : null,
+          alertThreshold: alertThreshold ? {
+            min: alertThreshold.thresholdValueMin,
+            max: alertThreshold.thresholdValueMax,
+            conditionType: alertThreshold.conditionType,
+          } : null,
+          // Evaluar manualmente
+          alertViolated: alertThreshold ? (
+            (alertThreshold.thresholdValueMin && value < Number(alertThreshold.thresholdValueMin)) ||
+            (alertThreshold.thresholdValueMax && value > Number(alertThreshold.thresholdValueMax))
+          ) : false,
+          warningViolated: warningThreshold ? (
+            (warningThreshold.thresholdValueMin && value < Number(warningThreshold.thresholdValueMin)) ||
+            (warningThreshold.thresholdValueMax && value > Number(warningThreshold.thresholdValueMax))
+          ) : false,
+        };
+      }
+
+      // Alertas activas
+      const activeAlerts = await this.alertRepo.find({
+        where: { sensor: { id: sensorId }, status: 'active' },
+      });
+      info.activeAlerts = activeAlerts.map(a => ({
+        id: a.id,
+        severity: a.severity,
+        status: a.status,
+        triggeredValue: a.triggeredValue,
+        triggeredAt: a.triggeredAt,
+      }));
     } else {
       info.totalDevices = await this.deviceRepo.count();
       info.totalSensors = await this.sensorRepo.count();
@@ -1197,6 +1340,15 @@ export class MonitoringService {
       };
     });
 
+    // FIX AUDITORIA: Incluir estado operacional para que Flutter pueda mostrar warm-up
+    const operationalState = {
+      state: sensor.operationalState ?? 'UNKNOWN',
+      stateSince: sensor.stateChangedAt?.toISOString() ?? null,
+      validReadingsCount: sensor.validReadingsCount ?? 0,
+      minReadingsForNormal: sensor.minReadingsForNormal ?? 10,
+      canGenerateEvents: ['NORMAL', 'WARNING', 'ALERT'].includes(sensor.operationalState ?? ''),
+    };
+
     return {
       sensorId: String(sensorId),
       metrics: {
@@ -1206,6 +1358,7 @@ export class MonitoringService {
         state,
         thresholds: canonicalThresholds,
         prediction: null, // TODO: integrar predicciones ML si existen
+        operationalState, // FIX AUDITORIA: Exponer estado operacional a Flutter
       },
       mlEvent: latestMlEvent
         ? {

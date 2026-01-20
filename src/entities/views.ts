@@ -80,6 +80,9 @@ export class ActiveAlertView {
   @ViewColumn()
   unit!: string;
 
+  @ViewColumn({ name: 'operational_state' })
+  operationalState!: string;
+
   @ViewColumn({ name: 'threshold_name' })
   thresholdName!: string | null;
 
@@ -137,6 +140,9 @@ export class MlEventActiveView {
   @ViewColumn()
   unit!: string | null;
 
+  @ViewColumn({ name: 'operational_state' })
+  operationalState!: string | null;
+
   @ViewColumn({ name: 'prediction_id' })
   predictionId!: string | null;
 
@@ -170,14 +176,117 @@ export class LatestSensorReadingView {
   @ViewColumn()
   unit!: string;
 
+  @ViewColumn({ name: 'device_id' })
+  deviceId!: string;
+
   @ViewColumn({ name: 'device_name' })
   deviceName!: string;
+
+  @ViewColumn({ name: 'device_uuid' })
+  deviceUuid!: string;
 
   @ViewColumn({ name: 'latest_value' })
   latestValue!: string | null;
 
   @ViewColumn({ name: 'latest_timestamp' })
   latestTimestamp!: Date | null;
+
+  // SSOT: Estado operacional autoritativo
+  @ViewColumn({ name: 'operational_state' })
+  operationalState!: 'INITIALIZING' | 'NORMAL' | 'WARNING' | 'ALERT' | 'STALE' | 'UNKNOWN';
+
+  @ViewColumn({ name: 'valid_readings_count' })
+  validReadingsCount!: number;
+
+  @ViewColumn({ name: 'min_readings_for_normal' })
+  minReadingsForNormal!: number;
+
+  @ViewColumn({ name: 'state_changed_at' })
+  stateChangedAt!: Date | null;
+
+  @ViewColumn({ name: 'can_generate_events' })
+  canGenerateEvents!: boolean;
+}
+
+@ViewEntity({ name: 'v_sensor_consolidated_status' })
+export class SensorConsolidatedStatusView {
+  @ViewColumn({ name: 'sensor_id' })
+  sensorId!: string;
+
+  @ViewColumn({ name: 'sensor_uuid' })
+  sensorUuid!: string;
+
+  @ViewColumn({ name: 'sensor_name' })
+  sensorName!: string;
+
+  @ViewColumn({ name: 'sensor_type' })
+  sensorType!: string;
+
+  @ViewColumn()
+  unit!: string;
+
+  @ViewColumn({ name: 'device_id' })
+  deviceId!: string;
+
+  @ViewColumn({ name: 'device_name' })
+  deviceName!: string;
+
+  @ViewColumn({ name: 'device_uuid' })
+  deviceUuid!: string;
+
+  @ViewColumn({ name: 'latest_value' })
+  latestValue!: string | null;
+
+  @ViewColumn({ name: 'latest_timestamp' })
+  latestTimestamp!: Date | null;
+
+  @ViewColumn({ name: 'operational_state' })
+  operationalState!: string;
+
+  @ViewColumn({ name: 'valid_readings_count' })
+  validReadingsCount!: number;
+
+  @ViewColumn({ name: 'min_readings_for_normal' })
+  minReadingsForNormal!: number;
+
+  @ViewColumn({ name: 'active_alert_id' })
+  activeAlertId!: string | null;
+
+  @ViewColumn({ name: 'alert_severity' })
+  alertSeverity!: string | null;
+
+  @ViewColumn({ name: 'alert_triggered_value' })
+  alertTriggeredValue!: string | null;
+
+  @ViewColumn({ name: 'alert_triggered_at' })
+  alertTriggeredAt!: Date | null;
+
+  @ViewColumn({ name: 'active_warning_id' })
+  activeWarningId!: string | null;
+
+  @ViewColumn({ name: 'warning_event_code' })
+  warningEventCode!: string | null;
+
+  @ViewColumn({ name: 'warning_title' })
+  warningTitle!: string | null;
+
+  @ViewColumn({ name: 'warning_created_at' })
+  warningCreatedAt!: Date | null;
+
+  @ViewColumn({ name: 'final_state' })
+  finalState!: 'INITIALIZING' | 'NORMAL' | 'WARNING' | 'ALERT' | 'STALE' | 'UNKNOWN';
+
+  @ViewColumn({ name: 'has_active_alert' })
+  hasActiveAlert!: boolean;
+
+  @ViewColumn({ name: 'has_active_warning' })
+  hasActiveWarning!: boolean;
+
+  @ViewColumn({ name: 'can_generate_events' })
+  canGenerateEvents!: boolean;
+
+  @ViewColumn({ name: 'seconds_since_last_reading' })
+  secondsSinceLastReading!: number | null;
 }
 
 @ViewEntity({ name: 'v_alerts_history' })

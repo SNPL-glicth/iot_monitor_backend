@@ -83,7 +83,8 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection {
       | 'readings/latest'
       | 'alerts/active'
       | 'predictions/latest'
-      | 'ml/events/active',
+      | 'ml/events/active'
+      | 'sensors/consolidated',
     payload: unknown,
   ) {
     this.server.emit(event, payload);
