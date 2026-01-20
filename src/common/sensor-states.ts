@@ -73,6 +73,13 @@ export type AlertSeverityType = typeof AlertSeverity[keyof typeof AlertSeverity]
 /**
  * Evalúa el estado de telemetría de un valor contra umbrales.
  * 
+ * IMPORTANTE: Esta función evalúa si el valor VIOLA los umbrales.
+ * - out_of_range: valor < min O valor > max → VIOLA
+ * - greater_than: valor > min → VIOLA (min y max definen rango normal)
+ * - less_than: valor < min → VIOLA
+ * 
+ * Si el valor está DENTRO del rango definido por el usuario, es NORMAL.
+ * 
  * @param value - Valor actual del sensor
  * @param thresholds - Umbrales configurados
  * @returns Estado de telemetría (NORMAL, WARNING, ALERT)
@@ -84,29 +91,99 @@ export function evaluateTelemetryState(
     warningMax?: number | null;
     alertMin?: number | null;
     alertMax?: number | null;
+    warningConditionType?: string | null;
+    alertConditionType?: string | null;
   },
 ): SensorTelemetryStateType {
   if (value === null) {
     return SensorTelemetryState.NORMAL;
   }
 
-  const { warningMin, warningMax, alertMin, alertMax } = thresholds;
+  const { warningMin, warningMax, alertMin, alertMax, warningConditionType, alertConditionType } = thresholds;
 
+  // =========================================================================
   // Primero verificar ALERT (más crítico)
-  if (alertMin !== null && alertMin !== undefined && value < alertMin) {
-    return SensorTelemetryState.ALERT;
-  }
-  if (alertMax !== null && alertMax !== undefined && value > alertMax) {
+  // =========================================================================
+  const alertViolated = evaluateThresholdViolation(
+    value,
+    alertMin,
+    alertMax,
+    alertConditionType ?? 'out_of_range',
+  );
+  if (alertViolated) {
     return SensorTelemetryState.ALERT;
   }
 
+  // =========================================================================
   // Luego WARNING
-  if (warningMin !== null && warningMin !== undefined && value < warningMin) {
-    return SensorTelemetryState.WARNING;
-  }
-  if (warningMax !== null && warningMax !== undefined && value > warningMax) {
+  // =========================================================================
+  const warningViolated = evaluateThresholdViolation(
+    value,
+    warningMin,
+    warningMax,
+    warningConditionType ?? 'out_of_range',
+  );
+  if (warningViolated) {
     return SensorTelemetryState.WARNING;
   }
 
   return SensorTelemetryState.NORMAL;
+}
+
+/**
+ * Evalúa si un valor VIOLA un umbral según el tipo de condición.
+ * 
+ * @param value - Valor a evaluar
+ * @param min - Umbral mínimo
+ * @param max - Umbral máximo
+ * @param conditionType - Tipo de condición
+ * @returns true si el valor VIOLA el umbral (está fuera del rango normal)
+ */
+function evaluateThresholdViolation(
+  value: number,
+  min: number | null | undefined,
+  max: number | null | undefined,
+  conditionType: string,
+): boolean {
+  // Sin umbrales configurados → no hay violación
+  if ((min === null || min === undefined) && (max === null || max === undefined)) {
+    return false;
+  }
+
+  switch (conditionType) {
+    case 'out_of_range':
+      // Viola si está FUERA del rango [min, max]
+      if (min !== null && min !== undefined && value < min) return true;
+      if (max !== null && max !== undefined && value > max) return true;
+      return false;
+
+    case 'greater_than':
+      // Para greater_than con min y max definidos:
+      // El rango [min, max] define valores NORMALES
+      // Viola si está FUERA de ese rango
+      if (min !== null && min !== undefined && max !== null && max !== undefined) {
+        // Rango normal: [min, max]
+        if (value < min || value > max) return true;
+        return false;
+      }
+      // Solo min definido: viola si valor > min
+      if (min !== null && min !== undefined && value > min) return true;
+      return false;
+
+    case 'less_than':
+      // Viola si valor < min
+      if (min !== null && min !== undefined && value < min) return true;
+      return false;
+
+    case 'equal_to':
+      // Viola si valor == min (exactamente igual)
+      if (min !== null && min !== undefined && value === min) return true;
+      return false;
+
+    default:
+      // Fallback a out_of_range
+      if (min !== null && min !== undefined && value < min) return true;
+      if (max !== null && max !== undefined && value > max) return true;
+      return false;
+  }
 }

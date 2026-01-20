@@ -560,22 +560,28 @@ export class MonitoringService {
       ? Number(latestReading.value)
       : null;
 
+    // FIX: Ahora considera el conditionType para evaluar correctamente
     const telemetryState = evaluateTelemetryState(currentValue, {
       warningMin: warningThreshold?.thresholdValueMin !== null ? Number(warningThreshold?.thresholdValueMin) : null,
       warningMax: warningThreshold?.thresholdValueMax !== null ? Number(warningThreshold?.thresholdValueMax) : null,
       alertMin: alertThreshold?.thresholdValueMin !== null ? Number(alertThreshold?.thresholdValueMin) : null,
       alertMax: alertThreshold?.thresholdValueMax !== null ? Number(alertThreshold?.thresholdValueMax) : null,
+      warningConditionType: warningThreshold?.conditionType ?? 'out_of_range',
+      alertConditionType: alertThreshold?.conditionType ?? 'out_of_range',
     });
 
     // Verificar si predicción cruzaría umbrales
     let predictionWouldBreach = false;
     if (latestPrediction) {
       const predValue = Number(latestPrediction.predictedValue);
+      // FIX: Ahora considera el conditionType para evaluar correctamente
       const predState = evaluateTelemetryState(predValue, {
         warningMin: warningThreshold?.thresholdValueMin !== null ? Number(warningThreshold?.thresholdValueMin) : null,
         warningMax: warningThreshold?.thresholdValueMax !== null ? Number(warningThreshold?.thresholdValueMax) : null,
         alertMin: alertThreshold?.thresholdValueMin !== null ? Number(alertThreshold?.thresholdValueMin) : null,
         alertMax: alertThreshold?.thresholdValueMax !== null ? Number(alertThreshold?.thresholdValueMax) : null,
+        warningConditionType: warningThreshold?.conditionType ?? 'out_of_range',
+        alertConditionType: alertThreshold?.conditionType ?? 'out_of_range',
       });
       predictionWouldBreach = predState !== SensorTelemetryState.NORMAL;
     }
@@ -1105,20 +1111,25 @@ export class MonitoringService {
       warning: {
         min: warningThreshold?.thresholdValueMin ? Number(warningThreshold.thresholdValueMin) : null,
         max: warningThreshold?.thresholdValueMax ? Number(warningThreshold.thresholdValueMax) : null,
+        conditionType: warningThreshold?.conditionType ?? 'out_of_range',
       },
       alert: {
         min: alertThreshold?.thresholdValueMin ? Number(alertThreshold.thresholdValueMin) : null,
         max: alertThreshold?.thresholdValueMax ? Number(alertThreshold.thresholdValueMax) : null,
+        conditionType: alertThreshold?.conditionType ?? 'out_of_range',
       },
     };
 
     // Evaluar estado actual basado en umbrales (usando función canónica)
+    // FIX: Ahora considera el conditionType para evaluar correctamente
     const currentValue = latestReading ? Number(latestReading.value) : null;
     const state = evaluateTelemetryState(currentValue, {
       warningMin: canonicalThresholds.warning.min,
       warningMax: canonicalThresholds.warning.max,
       alertMin: canonicalThresholds.alert.min,
       alertMax: canonicalThresholds.alert.max,
+      warningConditionType: canonicalThresholds.warning.conditionType,
+      alertConditionType: canonicalThresholds.alert.conditionType,
     });
 
     // Contar alertas activas
@@ -1148,11 +1159,14 @@ export class MonitoringService {
       const value = Number(r.value);
       
       // Usar función canónica para evaluar estado (INC-01/INC-03)
+      // FIX: Ahora considera el conditionType para evaluar correctamente
       const pointState = evaluateTelemetryState(value, {
         warningMin: canonicalThresholds.warning.min,
         warningMax: canonicalThresholds.warning.max,
         alertMin: canonicalThresholds.alert.min,
         alertMax: canonicalThresholds.alert.max,
+        warningConditionType: canonicalThresholds.warning.conditionType,
+        alertConditionType: canonicalThresholds.alert.conditionType,
       });
 
       // Calcular delta respecto al punto anterior
@@ -1162,31 +1176,16 @@ export class MonitoringService {
         delta = value - prevValue;
       }
 
-      // INC-05: Usar umbral de delta desde BD en lugar de hardcoded
+      // =========================================================================
+      // FIX SSOT: NO recalcular delta spike visualmente.
+      // La gráfica debe mostrar SOLO el estado basado en umbrales del usuario.
+      // Los eventos DELTA_SPIKE solo existen si están persistidos en ml_events.
+      // 
+      // REGLA: Si no existe evento en alerts/ml_events, NO puede haber
+      // advertencia visual en la gráfica.
+      // =========================================================================
       const events: string[] = [];
-      // FIX COHERENCIA GRÁFICA CONGELADA: El estado del punto debe reflejar
-      // si hubo un delta spike, para que la gráfica congelada sea coherente
-      // con las advertencias generadas por la ingesta.
-      //
-      // Reglas de prioridad: ALERT > WARNING (umbral) > WARNING (delta spike) > NORMAL
-      //
-      // Si el punto está en ALERT por umbral, mantener ALERT.
-      // Si el punto está en WARNING por umbral, mantener WARNING.
-      // Si el punto está en NORMAL pero tiene delta spike, marcar como WARNING.
-      let finalState = pointState;
-      
-      const hasDeltaSpike = delta !== null &&
-        deltaThreshold !== null &&
-        Math.abs(delta) >= deltaThreshold;
-      
-      if (hasDeltaSpike) {
-        events.push('DELTA_SPIKE');
-        // FIX COHERENCIA: Si el punto está NORMAL pero tiene delta spike,
-        // marcarlo como WARNING para coherencia con la ingesta
-        if (pointState === SensorTelemetryState.NORMAL) {
-          finalState = SensorTelemetryState.WARNING;
-        }
-      }
+      const finalState = pointState;
 
       return {
         timestamp: r.timestamp.toISOString(),
