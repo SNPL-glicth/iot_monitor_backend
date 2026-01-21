@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import { Prediction } from '../entities/prediction.entity';
 import { Device } from '../entities/device.entity';
 import { Sensor } from '../entities/sensor.entity';
+import { DecisionAction } from '../entities/decision-action.entity';
 import { MlEventActiveView } from '../entities/views';
 import {
   IntelligencePredictionDto,
@@ -15,6 +16,10 @@ import {
   IntelligenceHealthStatus,
   IntelligenceSeverity,
 } from './intelligence.dto';
+import {
+  DecisionActionDto,
+  DecisionActionListResponseDto,
+} from './decision-action.dto';
 
 function toIsoOrNull(d: Date | null | undefined): string | null {
   return d ? d.toISOString() : null;
@@ -63,6 +68,8 @@ export class IntelligenceService {
     private readonly sensorRepo: Repository<Sensor>,
     @InjectRepository(Device)
     private readonly deviceRepo: Repository<Device>,
+    @InjectRepository(DecisionAction)
+    private readonly decisionRepo: Repository<DecisionAction>,
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -284,6 +291,152 @@ export class IntelligenceService {
     const dto = new IntelligenceHealthDto();
     dto.summary = summary;
     dto.sensors = healthBySensor;
+    return dto;
+  }
+
+  // ---------------------------------------------------------------------------
+  // GET /intelligence/decisions
+  // ---------------------------------------------------------------------------
+  async listDecisions(
+    limit = 50,
+    status?: string,
+    severity?: string,
+  ): Promise<DecisionActionListResponseDto> {
+    const qb = this.decisionRepo
+      .createQueryBuilder('d')
+      .leftJoinAndSelect('d.device', 'device')
+      .orderBy('d.priority', 'ASC')
+      .addOrderBy('d.createdAt', 'DESC')
+      .limit(limit);
+
+    // Filtrar por status si se proporciona
+    if (status) {
+      qb.andWhere('d.status = :status', { status });
+    }
+
+    // Filtrar por severity si se proporciona
+    if (severity) {
+      qb.andWhere('d.severity = :severity', { severity });
+    }
+
+    // Solo decisiones no expiradas
+    qb.andWhere('(d.expiresAt IS NULL OR d.expiresAt > :now)', { now: new Date() });
+
+    const [rows, total] = await qb.getManyAndCount();
+
+    const decisions: DecisionActionDto[] = rows.map((d) => {
+      const dto = new DecisionActionDto();
+      dto.id = String(d.id);
+      dto.deviceId = String(d.deviceId);
+      dto.deviceName = d.device?.name ?? 'Dispositivo';
+      dto.patternSignature = d.patternSignature;
+      dto.decisionType = d.decisionType;
+      dto.priority = d.priority;
+      dto.severity = d.severity;
+      dto.title = d.title;
+      dto.summary = d.summary;
+      dto.explanation = d.explanation ?? null;
+
+      // Parsear recommended_actions
+      let actions: any[] = [];
+      try {
+        if (d.recommendedActions) {
+          actions = JSON.parse(d.recommendedActions);
+        }
+      } catch {
+        actions = [];
+      }
+      dto.recommendedActions = actions;
+
+      // Parsear affected_sensors
+      let sensorIds: number[] = [];
+      try {
+        if (d.affectedSensors) {
+          sensorIds = JSON.parse(d.affectedSensors);
+        }
+      } catch {
+        sensorIds = [];
+      }
+      dto.affectedSensorIds = sensorIds;
+
+      dto.eventCount = d.eventCount;
+      dto.status = d.status;
+      dto.shouldNotify = Boolean(d.shouldNotify);
+      dto.createdAt = formatIso(d.createdAt);
+      dto.expiresAt = toIsoOrNull(d.expiresAt);
+      dto.acknowledgedAt = toIsoOrNull(d.acknowledgedAt);
+      dto.resolvedAt = toIsoOrNull(d.resolvedAt);
+
+      // Calcular edad en minutos
+      const now = new Date();
+      dto.ageMinutes = d.createdAt
+        ? Math.round((now.getTime() - d.createdAt.getTime()) / 60000)
+        : 0;
+
+      return dto;
+    });
+
+    const response = new DecisionActionListResponseDto();
+    response.decisions = decisions;
+    response.total = total;
+    return response;
+  }
+
+  // ---------------------------------------------------------------------------
+  // PATCH /intelligence/decisions/:id/status
+  // ---------------------------------------------------------------------------
+  async updateDecisionStatus(
+    decisionId: string,
+    newStatus: 'acknowledged' | 'resolved',
+  ): Promise<DecisionActionDto | null> {
+    const id = parseInt(decisionId, 10);
+    if (isNaN(id)) return null;
+
+    const decision = await this.decisionRepo.findOne({
+      where: { id },
+      relations: ['device'],
+    });
+
+    if (!decision) return null;
+
+    decision.status = newStatus;
+    if (newStatus === 'acknowledged') {
+      decision.acknowledgedAt = new Date();
+    } else if (newStatus === 'resolved') {
+      decision.resolvedAt = new Date();
+    }
+
+    await this.decisionRepo.save(decision);
+
+    // Retornar DTO actualizado
+    const dto = new DecisionActionDto();
+    dto.id = String(decision.id);
+    dto.deviceId = String(decision.deviceId);
+    dto.deviceName = decision.device?.name ?? 'Dispositivo';
+    dto.patternSignature = decision.patternSignature;
+    dto.decisionType = decision.decisionType;
+    dto.priority = decision.priority;
+    dto.severity = decision.severity;
+    dto.title = decision.title;
+    dto.summary = decision.summary;
+    dto.explanation = decision.explanation ?? null;
+    dto.recommendedActions = decision.recommendedActions
+      ? JSON.parse(decision.recommendedActions)
+      : [];
+    dto.affectedSensorIds = decision.affectedSensors
+      ? JSON.parse(decision.affectedSensors)
+      : [];
+    dto.eventCount = decision.eventCount;
+    dto.status = decision.status;
+    dto.shouldNotify = Boolean(decision.shouldNotify);
+    dto.createdAt = formatIso(decision.createdAt);
+    dto.expiresAt = toIsoOrNull(decision.expiresAt);
+    dto.acknowledgedAt = toIsoOrNull(decision.acknowledgedAt);
+    dto.resolvedAt = toIsoOrNull(decision.resolvedAt);
+    dto.ageMinutes = decision.createdAt
+      ? Math.round((new Date().getTime() - decision.createdAt.getTime()) / 60000)
+      : 0;
+
     return dto;
   }
 }

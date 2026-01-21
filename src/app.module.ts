@@ -14,6 +14,7 @@ import { DeviceLocation } from './entities/device-location.entity';
 import { Command } from './entities/command.entity';
 import { MlModel } from './entities/ml-model.entity';
 import { Prediction } from './entities/prediction.entity';
+import { DecisionAction } from './entities/decision-action.entity';
 import { AuditLog } from './entities/audit-log.entity';
 import { SystemMetric } from './entities/system-metric.entity';
 import { RefreshToken } from './entities/refresh-token.entity';
@@ -66,6 +67,7 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
         Command,
         MlModel,
         Prediction,
+        DecisionAction,
         AuditLog,
         SystemMetric,
         RefreshToken,
