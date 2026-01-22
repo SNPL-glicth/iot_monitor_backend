@@ -20,6 +20,7 @@ import {
 } from './auth.cookies';
 import { AuthService } from './auth.service';
 import { generateCsrfToken } from './auth.utils';
+import { LoginRateLimitGuard, clearLoginAttempts } from './login-rate-limit.guard';
 
 class LoginDto {
   username!: string; // puede ser username o email
@@ -32,7 +33,10 @@ export class AuthController {
 
   /**
    * Login seguro (producción): emite cookies HttpOnly y NO devuelve el access_token al frontend.
+   * 
+   * SECURITY: Rate limiting aplicado - máx 5 intentos por IP en 15 min.
    */
+  @UseGuards(LoginRateLimitGuard)
   @Post('login')
   async login(
     @Body() body: LoginDto,
@@ -48,6 +52,9 @@ export class AuthController {
 
     const result = await this.authService.loginCookie(username, password, ctx);
 
+    // Login exitoso: limpiar contadores de rate limiting
+    clearLoginAttempts(this.getClientIp(req), username);
+
     setAccessTokenCookie(res, result.tokens.accessToken, result.tokens.accessTokenMaxAgeMs);
     setRefreshTokenCookie(res, result.tokens.refreshToken, result.tokens.refreshTokenMaxAgeMs);
 
@@ -60,11 +67,27 @@ export class AuthController {
   /**
    * Login legacy: devuelve access_token para clientes que usan Authorization: Bearer.
    * Recomendado solo para apps nativas (Flutter) o scripts.
+   * 
+   * SECURITY: Rate limiting aplicado - máx 5 intentos por IP en 15 min.
    */
+  @UseGuards(LoginRateLimitGuard)
   @Post('login-token')
-  loginToken(@Body() body: LoginDto) {
+  async loginToken(@Body() body: LoginDto, @Req() req: Request) {
     const { username, password } = body;
-    return this.authService.loginBearer(username, password);
+    const result = await this.authService.loginBearer(username, password);
+    
+    // Login exitoso: limpiar contadores de rate limiting
+    clearLoginAttempts(this.getClientIp(req), username);
+    
+    return result;
+  }
+  
+  private getClientIp(request: Request): string {
+    const forwarded = request.headers['x-forwarded-for'];
+    if (typeof forwarded === 'string') {
+      return forwarded.split(',')[0].trim();
+    }
+    return request.ip || request.socket?.remoteAddress || 'unknown';
   }
 
   /**

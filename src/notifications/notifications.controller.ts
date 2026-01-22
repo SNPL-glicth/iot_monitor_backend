@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, Req, UseGuards, Headers, HttpCode, Logger } from '@nestjs/common';
 
 import { NotificationsService } from './notifications.service';
 import { RegisterDeviceDto } from './notifications.dto';
@@ -6,6 +6,8 @@ import { AuthGuard } from '@nestjs/passport';
 
 @Controller('notifications')
 export class NotificationsController {
+  private readonly logger = new Logger(NotificationsController.name);
+
   constructor(private readonly notificationsService: NotificationsService) {}
 
   @UseGuards(AuthGuard('jwt') as any)
@@ -48,5 +50,72 @@ export class NotificationsController {
   async markRead(@Body('ids') ids: string[]) {
     await this.notificationsService.markNotificationsAsRead(ids ?? []);
     return { ok: true };
+  }
+
+  /**
+   * POST /notifications/internal/trigger-push
+   * 
+   * ENDPOINT INTERNO para disparar push notifications desde servicios Python.
+   * Autenticación via INTERNAL_API_KEY (no JWT).
+   * 
+   * Body:
+   * - type: 'alert' | 'decision'
+   * - alertId?: string (si type='alert')
+   * - decisionId?: string (si type='decision')
+   * - deviceId?: string (para buscar tokens FCM)
+   * - title?: string (título custom)
+   * - body?: string (mensaje custom)
+   */
+  @Post('internal/trigger-push')
+  @HttpCode(200)
+  async triggerPush(
+    @Headers('x-internal-key') internalKey: string,
+    @Body() body: {
+      type: 'alert' | 'decision';
+      alertId?: string;
+      decisionId?: string;
+      deviceId?: string;
+      title?: string;
+      body?: string;
+    },
+  ) {
+    // Validar API key interna
+    const expectedKey = process.env.INTERNAL_API_KEY;
+    if (!expectedKey) {
+      this.logger.warn('[PUSH] INTERNAL_API_KEY not configured - rejecting internal trigger');
+      return { ok: false, error: 'Internal API not configured' };
+    }
+    if (internalKey !== expectedKey) {
+      this.logger.warn('[PUSH] Invalid internal API key attempt');
+      return { ok: false, error: 'Unauthorized' };
+    }
+
+    this.logger.log(`[PUSH] Trigger received: type=${body.type} alertId=${body.alertId} decisionId=${body.decisionId}`);
+
+    try {
+      if (body.type === 'alert' && body.alertId) {
+        // Enviar push para alerta crítica
+        await this.notificationsService.sendCriticalAlertNotification(body.alertId);
+        this.logger.log(`[PUSH] Alert push sent for alertId=${body.alertId}`);
+        return { ok: true, sent: 'alert', alertId: body.alertId };
+      }
+
+      if (body.type === 'decision' && body.deviceId && body.title) {
+        // Enviar push custom para decisión
+        await this.notificationsService.sendDecisionNotification(
+          body.deviceId,
+          body.title,
+          body.body || 'Nueva decisión del sistema de inteligencia.',
+          body.decisionId,
+        );
+        this.logger.log(`[PUSH] Decision push sent for deviceId=${body.deviceId}`);
+        return { ok: true, sent: 'decision', deviceId: body.deviceId };
+      }
+
+      return { ok: false, error: 'Invalid payload' };
+    } catch (e) {
+      this.logger.error(`[PUSH] Error triggering push: ${e}`);
+      return { ok: false, error: String(e) };
+    }
   }
 }

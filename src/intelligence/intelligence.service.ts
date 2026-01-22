@@ -142,12 +142,46 @@ export class IntelligenceService {
   // ---------------------------------------------------------------------------
   // GET /intelligence/warnings
   // ---------------------------------------------------------------------------
-  async listWarnings(limit = 50): Promise<IntelligenceWarningDto[]> {
-    const rows = await this.mlEventsRepo
+  /**
+   * FIX CRÍTICO: Retorna solo 1 evento por sensor + event_code (el más reciente).
+   * 
+   * REGLA DE DOMINIO:
+   * - No mostrar duplicados del mismo sensor
+   * - Priorizar eventos activos sobre resueltos
+   * - Ordenar por severidad (critical > warning > info) y luego por fecha
+   */
+  async listWarnings(limit = 50, status?: string): Promise<IntelligenceWarningDto[]> {
+    // Subquery para obtener el evento más reciente por sensor + event_code
+    // Esto garantiza 1 evento por sensor en la respuesta
+    const subQuery = this.mlEventsRepo
+      .createQueryBuilder('sub')
+      .select('MAX(sub.eventId)', 'maxId')
+      .groupBy('sub.sensorId')
+      .addGroupBy('sub.eventCode');
+
+    const qb = this.mlEventsRepo
       .createQueryBuilder('e')
-      .orderBy('e.createdAt', 'DESC')
-      .limit(limit)
-      .getMany();
+      .where(`e.eventId IN (${subQuery.getQuery()})`)
+      .orderBy(
+        `CASE e.eventType 
+          WHEN 'critical' THEN 1 
+          WHEN 'warning' THEN 2 
+          ELSE 3 
+        END`,
+        'ASC',
+      )
+      .addOrderBy('e.createdAt', 'DESC')
+      .limit(limit);
+
+    // Filtrar por status si se proporciona (default: solo activos)
+    if (status) {
+      qb.andWhere('e.status = :status', { status });
+    } else {
+      // Por defecto mostrar solo eventos activos para evitar ruido
+      qb.andWhere('e.status = :status', { status: 'active' });
+    }
+
+    const rows = await qb.getMany();
 
     return rows.map((e) => {
       const dto = new IntelligenceWarningDto();

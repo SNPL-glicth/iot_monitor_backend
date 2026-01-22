@@ -307,6 +307,30 @@ export class MonitoringController {
   }
 
   /**
+   * GET /monitoring/sensors/:sensorId/historical-readings?from=ISO&to=ISO&limit=500
+   * 
+   * FIX OBJETIVO 1: Lecturas históricas por rango de fechas ABSOLUTAS.
+   * 
+   * CASO DE USO: Frozen chart para alertas del historial.
+   * - Usa `from` y `to` como fechas absolutas (no relativas a AHORA)
+   * - Funciona para alertas de hace semanas/meses
+   * - triggeredAt es la fuente de verdad
+   * 
+   * Ejemplo: from=triggeredAt-30min, to=triggeredAt+30min
+   */
+  @Get('sensors/:sensorId/historical-readings')
+  @Roles('admin', 'operator', 'viewer')
+  getHistoricalReadings(
+    @Param('sensorId', ParseIntPipe) sensorId: number,
+    @Query('from') from: string,
+    @Query('to') to: string,
+    @Query('limit') limit = '500',
+  ) {
+    const parsedLimit = Math.min(Math.max(1, Number(limit) || 500), 2000);
+    return this.monitoringService.getHistoricalReadings(sensorId, from, to, parsedLimit);
+  }
+
+  /**
    * POST /monitoring/run-alert-maintenance
    * 
    * Ejecuta manualmente el mantenimiento de alertas:

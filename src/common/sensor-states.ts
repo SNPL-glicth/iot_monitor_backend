@@ -156,9 +156,42 @@ function evaluateThresholdViolation(
     return false;
   }
 
-  // Evaluar violación de umbrales (out_of_range por defecto)
-  if (numMin !== null && value < numMin) return true;
-  if (numMax !== null && value > numMax) return true;
+  // =========================================================================
+  // FIX ARQUITECTÓNICO: Si hay AMBOS min Y max definidos, SIEMPRE usar out_of_range
+  // 
+  // RAZÓN: Si el usuario configura min=6 y max=13, espera que el valor esté
+  // DENTRO de ese rango para ser NORMAL. El conditionType puede estar mal
+  // configurado en la BD, pero la intención del usuario es clara.
+  // 
+  // REGLA: 
+  // - Si hay min Y max → out_of_range (valor debe estar DENTRO del rango)
+  // - Si solo hay min → greater_than o less_than según conditionType
+  // - Si solo hay max → greater_than o less_than según conditionType
+  // =========================================================================
   
-  return false;
+  // Si hay AMBOS min y max, forzar lógica out_of_range
+  if (numMin !== null && numMax !== null) {
+    // Viola si está FUERA del rango [min, max]
+    return value < numMin || value > numMax;
+  }
+  
+  // Solo hay uno de los dos umbrales, usar conditionType
+  switch (conditionType) {
+    case 'greater_than':
+      // Viola si value > umbral
+      const gtThreshold = numMin ?? numMax;
+      return gtThreshold !== null && value > gtThreshold;
+      
+    case 'less_than':
+      // Viola si value < umbral
+      const ltThreshold = numMin ?? numMax;
+      return ltThreshold !== null && value < ltThreshold;
+      
+    case 'out_of_range':
+    default:
+      // Solo un umbral definido, evaluar ese
+      if (numMin !== null && value < numMin) return true;
+      if (numMax !== null && value > numMax) return true;
+      return false;
+  }
 }

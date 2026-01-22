@@ -514,6 +514,38 @@ export class NotificationsService {
   }
 
   /**
+   * Envía push notification para una decisión del Decision Orchestrator.
+   * Llamado desde endpoint interno cuando should_notify=true.
+   */
+  async sendDecisionNotification(
+    deviceId: string,
+    title: string,
+    body: string,
+    decisionId?: string,
+  ): Promise<void> {
+    const tokens = await this.getFcmTokensForDevice(deviceId);
+    if (!tokens.length) {
+      this.logger.log(
+        `sendDecisionNotification: no push tokens for deviceId=${deviceId}`,
+      );
+      return;
+    }
+
+    const payload: AlertPushPayload = {
+      title,
+      body,
+      data: {
+        type: 'decision',
+        deviceId,
+        decisionId: decisionId || '',
+      },
+    };
+
+    await this.sendFcm(tokens, payload);
+    this.logger.log(`[PUSH] Decision notification sent to ${tokens.length} devices for deviceId=${deviceId}`);
+  }
+
+  /**
    * TAREA 7: Obtiene destinatarios de alertas para un sensor específico.
    * Busca usuarios asociados al dispositivo del sensor.
    */

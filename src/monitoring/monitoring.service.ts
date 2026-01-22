@@ -11,7 +11,7 @@ import {
   evaluateTelemetryState,
 } from '../common/sensor-states';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, Repository } from 'typeorm';
 
 /**
  * FIX DEADLOCK: Detecta si el error es un deadlock de SQL Server (error 1205)
@@ -784,12 +784,24 @@ export class MonitoringService {
 
   /**
    * Estado consolidado en batch para múltiples sensores.
-   * FASE 3: Límite máximo de IDs para prevenir DoS
+   * SECURITY FIX: Validate input length BEFORE parsing to prevent DoS
    */
   private static readonly MAX_BATCH_SIZE = 100;
+  private static readonly MAX_INPUT_LENGTH = 1000; // ~100 IDs * 10 chars max each
 
   async getSensorConsolidatedStatusBatch(idsRaw: string) {
-    const ids = (idsRaw || '')
+    // SECURITY FIX: Validate input length BEFORE any processing to prevent DoS
+    if (!idsRaw || typeof idsRaw !== 'string') {
+      return [];
+    }
+    
+    if (idsRaw.length > MonitoringService.MAX_INPUT_LENGTH) {
+      throw new BadRequestException(
+        `Input too long: max ${MonitoringService.MAX_INPUT_LENGTH} characters allowed`
+      );
+    }
+
+    const ids = idsRaw
       .split(',')
       .map((s) => s.trim())
       .filter((s) => s && !isNaN(Number(s)))
@@ -799,7 +811,6 @@ export class MonitoringService {
       return [];
     }
 
-    // FASE 3: Validación de longitud máxima
     if (ids.length > MonitoringService.MAX_BATCH_SIZE) {
       throw new BadRequestException(
         `Máximo ${MonitoringService.MAX_BATCH_SIZE} sensores por batch. Recibidos: ${ids.length}`
@@ -1263,9 +1274,17 @@ export class MonitoringService {
       },
     };
 
-    // Evaluar estado actual basado en umbrales (usando función canónica)
-    // FIX: Ahora considera el conditionType para evaluar correctamente
+    // =========================================================================
+    // Evaluar estado actual basado en el VALOR vs UMBRALES
+    // 
+    // REGLA: El estado se determina comparando el valor actual con los umbrales.
+    // Si el valor está DENTRO del rango, es NORMAL.
+    // Si el valor está FUERA del rango WARNING, es WARNING.
+    // Si el valor está FUERA del rango CRITICAL, es ALERT.
+    // =========================================================================
     const currentValue = latestReading ? Number(latestReading.value) : null;
+
+    // Evaluar estado usando la función canónica
     const state = evaluateTelemetryState(currentValue, {
       warningMin: canonicalThresholds.warning.min,
       warningMax: canonicalThresholds.warning.max,
@@ -1275,13 +1294,19 @@ export class MonitoringService {
       alertConditionType: canonicalThresholds.alert.conditionType,
     });
 
-    // Contar alertas activas
-    const activeCritical = await this.alertRepo.count({
-      where: { sensor: { id: String(sensorId) }, status: 'active', severity: 'critical' },
-    });
-    const activeWarning = await this.alertRepo.count({
-      where: { sensor: { id: String(sensorId) }, status: 'active', severity: 'warning' },
-    });
+    // Contar alertas activas para el objeto de respuesta
+    const activeCritical = await this.alertRepo
+      .createQueryBuilder('a')
+      .where('a.sensor_id = :sensorId', { sensorId: String(sensorId) })
+      .andWhere('a.status IN (:...statuses)', { statuses: ['active', 'acknowledged'] })
+      .andWhere('a.severity = :severity', { severity: 'critical' })
+      .getCount();
+    const activeWarning = await this.alertRepo
+      .createQueryBuilder('a')
+      .where('a.sensor_id = :sensorId', { sensorId: String(sensorId) })
+      .andWhere('a.status IN (:...statuses)', { statuses: ['active', 'acknowledged'] })
+      .andWhere('a.severity = :severity', { severity: 'warning' })
+      .getCount();
 
     // Último evento ML relevante para UI (excluye DELTA_SPIKE).
     // No recalcula nada: solo expone lo ya persistido en ml_events (v_ml_events_active).
@@ -1587,6 +1612,99 @@ export class MonitoringService {
         samples: Number(row.samples),
       })),
     };
+  }
+
+  /**
+   * FIX OBJETIVO 1: Lecturas históricas por rango de fechas ABSOLUTAS.
+   * 
+   * CASO DE USO: Frozen chart para alertas del historial.
+   * - Usa `from` y `to` como fechas absolutas (no relativas a AHORA)
+   * - Funciona para alertas de hace semanas/meses
+   * - triggeredAt es la fuente de verdad
+   * 
+   * @param sensorId - ID del sensor
+   * @param from - Fecha inicio (ISO string)
+   * @param to - Fecha fin (ISO string)
+   * @param limit - Máximo de puntos a retornar
+   */
+  async getHistoricalReadings(sensorId: number, from: string, to: string, limit = 500) {
+    const sensor = await this.sensorRepo.findOne({
+      where: { id: String(sensorId) },
+      relations: ['device'],
+    });
+
+    if (!sensor) {
+      throw new NotFoundException('Sensor no encontrado');
+    }
+
+    // Parsear fechas
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+
+    if (isNaN(fromDate.getTime()) || isNaN(toDate.getTime())) {
+      throw new BadRequestException('Fechas inválidas. Usar formato ISO 8601.');
+    }
+
+    // Obtener lecturas en el rango absoluto
+    const readings = await this.sensorReadingRepo
+      .createQueryBuilder('r')
+      .where('r.sensor_id = :sensorId', { sensorId: String(sensorId) })
+      .andWhere('r.timestamp >= :from', { from: fromDate })
+      .andWhere('r.timestamp <= :to', { to: toDate })
+      .orderBy('r.timestamp', 'ASC')
+      .take(limit)
+      .getMany();
+
+    // Obtener umbrales activos para el sensor (warning y critical separados)
+    const allThresholds = await this.thresholdRepo.find({
+      where: { sensor: { id: String(sensorId) }, isActive: true },
+    });
+    
+    const warningThreshold = allThresholds.find(t => t.severity === 'warning');
+    const alertThreshold = allThresholds.find(t => t.severity === 'critical');
+    
+    const thresholdData = {
+      alertMin: alertThreshold?.thresholdValueMin ? Number(alertThreshold.thresholdValueMin) : null,
+      alertMax: alertThreshold?.thresholdValueMax ? Number(alertThreshold.thresholdValueMax) : null,
+      warningMin: warningThreshold?.thresholdValueMin ? Number(warningThreshold.thresholdValueMin) : null,
+      warningMax: warningThreshold?.thresholdValueMax ? Number(warningThreshold.thresholdValueMax) : null,
+    };
+
+    return {
+      sensorId: String(sensorId),
+      sensorName: sensor.name,
+      deviceName: sensor.device?.name ?? '',
+      unit: sensor.unit,
+      from: fromDate.toISOString(),
+      to: toDate.toISOString(),
+      count: readings.length,
+      thresholds: thresholdData,
+      series: readings.map((r) => ({
+        timestamp: r.timestamp instanceof Date ? r.timestamp.toISOString() : r.timestamp,
+        value: Number(r.value),
+        state: this.classifyReadingStateFromData(Number(r.value), thresholdData),
+      })),
+    };
+  }
+
+  /**
+   * Clasifica el estado de una lectura según los umbrales.
+   */
+  private classifyReadingStateFromData(
+    value: number, 
+    thresholds: { alertMin: number | null; alertMax: number | null; warningMin: number | null; warningMax: number | null },
+  ): string {
+    if (!thresholds) return 'NORMAL';
+
+    // Verificar alerta primero (más severo)
+    if (thresholds.alertMin !== null && value < thresholds.alertMin) return 'ALERT';
+    if (thresholds.alertMax !== null && value > thresholds.alertMax) return 'ALERT';
+
+    // Verificar warning
+    if (thresholds.warningMin !== null && value < thresholds.warningMin) return 'WARNING';
+    if (thresholds.warningMax !== null && value > thresholds.warningMax) return 'WARNING';
+
+    return 'NORMAL';
   }
 
   /**

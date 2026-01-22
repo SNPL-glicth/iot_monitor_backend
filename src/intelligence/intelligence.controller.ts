@@ -14,9 +14,15 @@ export class IntelligenceController {
   }
 
   @Get('warnings')
-  async getWarnings(@Query('limit') limit?: string): Promise<IntelligenceWarningDto[]> {
+  async getWarnings(
+    @Query('limit') limit?: string,
+    @Query('status') status?: string,
+  ): Promise<IntelligenceWarningDto[]> {
     const n = limit ? Number(limit) : 50;
-    return this.intelligenceService.listWarnings(Number.isFinite(n) && n > 0 ? n : 50);
+    return this.intelligenceService.listWarnings(
+      Number.isFinite(n) && n > 0 ? n : 50,
+      status,
+    );
   }
 
   @Get('health')

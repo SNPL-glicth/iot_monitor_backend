@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 
+import { getJwtSecret } from './jwt-secret';
+
 export interface JwtPayload {
   sub: string;
   username: string;
@@ -19,13 +21,14 @@ function cookieExtractor(req: any): string | null {
 @Injectable()
 export class JwtStrategy extends PassportStrategy(Strategy) {
   constructor() {
+    // SECURITY FIX: Use centralized getJwtSecret() with validation
     super({
       jwtFromRequest: ExtractJwt.fromExtractors([
         ExtractJwt.fromAuthHeaderAsBearerToken(),
         cookieExtractor,
       ]),
       ignoreExpiration: false,
-      secretOrKey: process.env.JWT_SECRET || 'dev_secret_change_me',
+      secretOrKey: getJwtSecret(),
     });
   }
 

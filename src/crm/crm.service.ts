@@ -592,6 +592,149 @@ export class CrmService {
     }, { retries: 3, baseDelayMs: 50 });
   }
 
+  /**
+   * FIX ARQUITECTÓNICO: Obtener snapshot INMUTABLE de la alerta.
+   * 
+   * El snapshot contiene datos congelados al momento del trigger:
+   * - Serie temporal
+   * - Umbrales vigentes
+   * - Metadatos
+   * 
+   * Este snapshot NUNCA cambia, independientemente del tiempo transcurrido.
+   */
+  async getAlertSnapshot(alertId: number, ctx: AuthCtx) {
+    return this.withReadUncommittedRetry(async (manager) => {
+      // Buscar snapshot existente
+      const snapshot = await manager.query(
+        `
+        SELECT 
+          id,
+          alert_id AS alertId,
+          sensor_id AS sensorId,
+          device_id AS deviceId,
+          sensor_name AS sensorName,
+          device_name AS deviceName,
+          unit,
+          sensor_type AS sensorType,
+          triggered_at AS triggeredAt,
+          triggered_value AS triggeredValue,
+          severity,
+          threshold_warning_min AS warningMin,
+          threshold_warning_max AS warningMax,
+          threshold_alert_min AS alertMin,
+          threshold_alert_max AS alertMax,
+          series_data AS seriesData,
+          context_from AS contextFrom,
+          context_to AS contextTo,
+          point_count AS pointCount,
+          created_at AS createdAt
+        FROM alert_snapshots WITH (NOLOCK)
+        WHERE alert_id = @0
+        `,
+        [alertId],
+      );
+
+      if (snapshot.length === 0) {
+        // Si no existe snapshot, intentar crearlo on-demand
+        // (para alertas creadas antes de la migración)
+        try {
+          await manager.query(
+            `EXEC sp_create_alert_snapshot @p_alert_id = @0`,
+            [alertId],
+          );
+          
+          // Reintentar obtener el snapshot
+          const retrySnapshot = await manager.query(
+            `
+            SELECT 
+              id,
+              alert_id AS alertId,
+              sensor_id AS sensorId,
+              device_id AS deviceId,
+              sensor_name AS sensorName,
+              device_name AS deviceName,
+              unit,
+              sensor_type AS sensorType,
+              triggered_at AS triggeredAt,
+              triggered_value AS triggeredValue,
+              severity,
+              threshold_warning_min AS warningMin,
+              threshold_warning_max AS warningMax,
+              threshold_alert_min AS alertMin,
+              threshold_alert_max AS alertMax,
+              series_data AS seriesData,
+              context_from AS contextFrom,
+              context_to AS contextTo,
+              point_count AS pointCount,
+              created_at AS createdAt
+            FROM alert_snapshots WITH (NOLOCK)
+            WHERE alert_id = @0
+            `,
+            [alertId],
+          );
+          
+          if (retrySnapshot.length === 0) {
+            throw new NotFoundException('No se pudo crear snapshot para la alerta');
+          }
+          
+          return this.formatSnapshot(retrySnapshot[0]);
+        } catch {
+          throw new NotFoundException('Snapshot no encontrado para la alerta');
+        }
+      }
+
+      return this.formatSnapshot(snapshot[0]);
+    });
+  }
+
+  private formatSnapshot(row: any) {
+    // Parsear series_data de JSON string a array
+    let series: Array<{ ts: string; value: number; state: string }> = [];
+    try {
+      series = typeof row.seriesData === 'string' 
+        ? JSON.parse(row.seriesData) 
+        : row.seriesData || [];
+    } catch {
+      series = [];
+    }
+
+    return {
+      alertId: Number(row.alertId),
+      sensorId: String(row.sensorId),
+      deviceId: String(row.deviceId),
+      sensorName: row.sensorName,
+      deviceName: row.deviceName,
+      unit: row.unit,
+      sensorType: row.sensorType,
+      triggeredAt: row.triggeredAt instanceof Date 
+        ? row.triggeredAt.toISOString() 
+        : row.triggeredAt,
+      triggeredValue: Number(row.triggeredValue),
+      severity: row.severity,
+      thresholds: {
+        warningMin: row.warningMin !== null ? Number(row.warningMin) : null,
+        warningMax: row.warningMax !== null ? Number(row.warningMax) : null,
+        alertMin: row.alertMin !== null ? Number(row.alertMin) : null,
+        alertMax: row.alertMax !== null ? Number(row.alertMax) : null,
+      },
+      series: series.map((p) => ({
+        timestamp: p.ts,
+        value: Number(p.value),
+        state: p.state,
+      })),
+      contextFrom: row.contextFrom instanceof Date 
+        ? row.contextFrom.toISOString() 
+        : row.contextFrom,
+      contextTo: row.contextTo instanceof Date 
+        ? row.contextTo.toISOString() 
+        : row.contextTo,
+      pointCount: Number(row.pointCount),
+      createdAt: row.createdAt instanceof Date 
+        ? row.createdAt.toISOString() 
+        : row.createdAt,
+    };
+  }
+
   private chooseBucket(from: Date, to: Date, maxPoints: number): '1m' | '5m' | '1h' {
     const rangeMs = to.getTime() - from.getTime();
     if (rangeMs <= 0) return '1m';

@@ -67,4 +67,7 @@ export class DecisionAction {
 
   @Column({ name: 'resolved_at', type: 'datetime2', nullable: true })
   resolvedAt: Date;
+
+  @Column({ name: 'reason_trace', type: 'nvarchar', nullable: true })
+  reasonTrace: string;
 }

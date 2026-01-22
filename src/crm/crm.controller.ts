@@ -175,6 +175,27 @@ export class CrmController {
     });
   }
 
+  /**
+   * GET /crm/alerts/:id/snapshot
+   * 
+   * FIX ARQUITECTÓNICO: Obtener snapshot INMUTABLE de la alerta.
+   * 
+   * El snapshot contiene:
+   * - Serie temporal congelada al momento del trigger
+   * - Umbrales vigentes al momento del trigger
+   * - Metadatos del sensor/dispositivo
+   * 
+   * Este snapshot NUNCA cambia, independientemente de cuánto tiempo pase.
+   */
+  @Get('alerts/:id/snapshot')
+  @Roles('admin', 'operator', 'viewer')
+  getAlertSnapshot(@Param('id', ParseIntPipe) id: number, @Req() req: any) {
+    return this.crm.getAlertSnapshot(id, {
+      userId: String(req.user?.userId ?? ''),
+      role: req.user?.role,
+    });
+  }
+
   @Get('dashboard')
   @Roles('admin', 'operator', 'viewer')
   getDashboard(

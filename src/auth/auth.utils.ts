@@ -33,10 +33,39 @@ export function generateCsrfToken(): string {
   return randomBytes(32).toString('base64url');
 }
 
+const MIN_REFRESH_SECRET_LENGTH = 32;
+
 export function getRefreshTokenSecret(): string {
   const secret = process.env.REFRESH_TOKEN_SECRET;
-  if (secret && secret.trim().length > 0) return secret;
+  const jwtSecret = process.env.JWT_SECRET;
+  const isProduction = process.env.NODE_ENV === 'production';
 
-  // fallback to JWT_SECRET in dev
-  return process.env.JWT_SECRET || 'dev_secret_change_me';
+  // SECURITY FIX: In production, require dedicated REFRESH_TOKEN_SECRET
+  if (isProduction) {
+    if (!secret || secret.trim().length < MIN_REFRESH_SECRET_LENGTH) {
+      throw new Error(`REFRESH_TOKEN_SECRET must be set and at least ${MIN_REFRESH_SECRET_LENGTH} characters in production`);
+    }
+    // Ensure refresh secret is different from JWT secret
+    if (secret === jwtSecret) {
+      throw new Error('REFRESH_TOKEN_SECRET must be different from JWT_SECRET in production');
+    }
+    return secret;
+  }
+
+  // Dev mode: allow fallbacks with warnings
+  if (secret && secret.trim().length >= MIN_REFRESH_SECRET_LENGTH) {
+    if (secret === jwtSecret) {
+      console.warn('\x1b[33m[SECURITY WARNING] REFRESH_TOKEN_SECRET equals JWT_SECRET - use different secrets in production!\x1b[0m');
+    }
+    return secret;
+  }
+
+  // Fallback chain for dev only
+  if (jwtSecret && jwtSecret.trim().length > 0) {
+    console.warn('\x1b[33m[SECURITY WARNING] REFRESH_TOKEN_SECRET not set - falling back to JWT_SECRET. DO NOT USE IN PRODUCTION!\x1b[0m');
+    return jwtSecret + '_refresh_suffix';
+  }
+
+  console.warn('\x1b[33m[SECURITY WARNING] No secrets configured - using insecure dev fallback. DO NOT USE IN PRODUCTION!\x1b[0m');
+  return 'dev_refresh_secret_change_me_32chars';
 }
