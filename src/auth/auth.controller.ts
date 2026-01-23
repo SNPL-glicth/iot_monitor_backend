@@ -65,8 +65,8 @@ export class AuthController {
   }
 
   /**
-   * Login legacy: devuelve access_token para clientes que usan Authorization: Bearer.
-   * Recomendado solo para apps nativas (Flutter) o scripts.
+   * Login para clientes Bearer (Flutter/mobile/scripts).
+   * Retorna access_token Y refresh_token en el body (no cookies).
    * 
    * SECURITY: Rate limiting aplicado - máx 5 intentos por IP en 15 min.
    */
@@ -74,12 +74,43 @@ export class AuthController {
   @Post('login-token')
   async loginToken(@Body() body: LoginDto, @Req() req: Request) {
     const { username, password } = body;
-    const result = await this.authService.loginBearer(username, password);
+    
+    const ctx = {
+      ip: req.ip,
+      userAgent: req.headers['user-agent']?.toString() ?? null,
+    };
+    
+    const result = await this.authService.loginBearerWithRefresh(username, password, ctx);
     
     // Login exitoso: limpiar contadores de rate limiting
     clearLoginAttempts(this.getClientIp(req), username);
     
     return result;
+  }
+
+  /**
+   * Refresh token para clientes Bearer (Flutter/mobile/scripts).
+   * Recibe refresh_token en el BODY (no en cookies).
+   * Retorna nuevo par de tokens.
+   */
+  @Post('refresh-token')
+  async refreshToken(@Body() body: { refresh_token: string }, @Req() req: Request) {
+    const refreshToken = body.refresh_token;
+    if (!refreshToken) {
+      return { ok: false, error: 'refresh_token required' };
+    }
+
+    const ctx = {
+      ip: req.ip,
+      userAgent: req.headers['user-agent']?.toString() ?? null,
+    };
+
+    try {
+      const result = await this.authService.refreshBearer(refreshToken, ctx);
+      return { ok: true, ...result };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : 'Refresh failed' };
+    }
   }
   
   private getClientIp(request: Request): string {
@@ -142,5 +173,28 @@ export class AuthController {
   @Get('me')
   me(@Req() req: any) {
     return { user: req.user };
+  }
+
+  /**
+   * DEBUG: Verifica un token y muestra info de diagnóstico.
+   * NO usar en producción - solo para desarrollo.
+   */
+  @Post('debug/verify-token')
+  async debugVerifyToken(@Body() body: { token: string }, @Req() req: Request) {
+    const { token } = body;
+    if (!token) {
+      return { ok: false, error: 'token required' };
+    }
+
+    try {
+      const result = await this.authService.debugVerifyToken(token);
+      return { ok: true, ...result };
+    } catch (error) {
+      return { 
+        ok: false, 
+        error: error instanceof Error ? error.message : 'Verification failed',
+        hint: 'Check if JWT_SECRET is consistent between signing and verification'
+      };
+    }
   }
 }

@@ -1708,6 +1708,238 @@ export class MonitoringService {
   }
 
   /**
+   * DIAGNÓSTICO: Flujo completo de telemetría.
+   * Verifica cada capa del pipeline de datos.
+   */
+  async debugTelemetryFlow(sensorId?: number) {
+    const logs: string[] = [];
+    const now = new Date();
+    
+    try {
+      // 1. Conteo total de lecturas
+      const totalReadings = await this.sensorReadingRepo.count();
+      logs.push(`📊 Total readings in DB: ${totalReadings}`);
+      
+      // 2. Lecturas en última hora
+      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+      const recentCount = await this.sensorReadingRepo
+        .createQueryBuilder('r')
+        .where('r.timestamp >= :since', { since: oneHourAgo })
+        .getCount();
+      logs.push(`🕐 Readings last hour: ${recentCount}`);
+      
+      // 3. Última lectura global
+      const lastReading = await this.sensorReadingRepo
+        .createQueryBuilder('r')
+        .orderBy('r.timestamp', 'DESC')
+        .getOne();
+      
+      if (lastReading) {
+        const lastTs = lastReading.timestamp instanceof Date 
+          ? lastReading.timestamp 
+          : new Date(lastReading.timestamp);
+        const ageMs = now.getTime() - lastTs.getTime();
+        const ageMinutes = Math.round(ageMs / 60000);
+        logs.push(`⏱️ Last reading age: ${ageMinutes} minutes ago`);
+        logs.push(`📍 Last reading: sensor=${lastReading.sensorId}, value=${lastReading.value}`);
+      } else {
+        logs.push(`❌ NO READINGS FOUND IN DATABASE`);
+      }
+      
+      // 4. Si se especificó sensorId, detalles específicos
+      let sensorSample: any = null;
+      if (sensorId) {
+        const sensor = await this.sensorRepo.findOne({ 
+          where: { id: String(sensorId) },
+          relations: ['device'],
+        });
+        
+        if (sensor) {
+          logs.push(`\n🎯 SENSOR ${sensorId} DETAILS:`);
+          logs.push(`   Name: ${sensor.name}`);
+          logs.push(`   Device: ${sensor.device?.name ?? 'N/A'}`);
+          logs.push(`   Unit: ${sensor.unit}`);
+          logs.push(`   Active: ${sensor.isActive}`);
+          
+          // Últimas 5 lecturas del sensor
+          const sensorReadings = await this.sensorReadingRepo
+            .createQueryBuilder('r')
+            .where('r.sensor_id = :sensorId', { sensorId: String(sensorId) })
+            .orderBy('r.timestamp', 'DESC')
+            .take(5)
+            .getMany();
+          
+          logs.push(`   Recent readings: ${sensorReadings.length}`);
+          
+          if (sensorReadings.length > 0) {
+            sensorSample = {
+              count: sensorReadings.length,
+              latest: {
+                timestamp: sensorReadings[0].timestamp,
+                value: Number(sensorReadings[0].value),
+              },
+              oldest: {
+                timestamp: sensorReadings[sensorReadings.length - 1].timestamp,
+                value: Number(sensorReadings[sensorReadings.length - 1].value),
+              },
+            };
+            
+            // Verificar duplicados de timestamp
+            const timestamps = sensorReadings.map(r => 
+              r.timestamp instanceof Date ? r.timestamp.getTime() : new Date(r.timestamp).getTime()
+            );
+            const uniqueTs = new Set(timestamps);
+            if (uniqueTs.size < timestamps.length) {
+              logs.push(`   ⚠️ WARNING: ${timestamps.length - uniqueTs.size} duplicate timestamps detected!`);
+            }
+          }
+        } else {
+          logs.push(`❌ Sensor ${sensorId} NOT FOUND`);
+        }
+      }
+      
+      // 5. Alertas activas
+      const activeAlerts = await this.activeAlertViewRepo.count();
+      logs.push(`\n🚨 Active alerts: ${activeAlerts}`);
+      
+      // 6. Estado del stream (basado en frecuencia de datos)
+      const streamHealth = recentCount > 0 ? 'ACTIVE' : 'DEAD';
+      logs.push(`🌊 Stream health: ${streamHealth}`);
+      
+      return {
+        timestamp: now.toISOString(),
+        status: recentCount > 0 ? 'OK' : 'NO_RECENT_DATA',
+        logs,
+        sensorSample,
+        summary: {
+          totalReadings,
+          recentCount,
+          activeAlerts,
+          streamHealth,
+        },
+      };
+    } catch (e) {
+      logs.push(`❌ ERROR: ${(e as Error).message}`);
+      return {
+        timestamp: now.toISOString(),
+        status: 'ERROR',
+        logs,
+        error: (e as Error).message,
+      };
+    }
+  }
+
+  /**
+   * DIAGNÓSTICO: Datos exactos que se envían al chart.
+   */
+  async debugChartData(sensorId: number, range: string) {
+    const now = new Date();
+    const rangeMs = this.parseRangeToMs(range);
+    const since = new Date(now.getTime() - rangeMs);
+    
+    // Obtener lecturas crudas
+    const readings = await this.sensorReadingRepo
+      .createQueryBuilder('r')
+      .where('r.sensor_id = :sensorId', { sensorId: String(sensorId) })
+      .andWhere('r.timestamp >= :since', { since })
+      .orderBy('r.timestamp', 'ASC')
+      .getMany();
+    
+    // Obtener umbrales
+    const thresholds = await this.thresholdRepo.find({
+      where: { sensor: { id: String(sensorId) }, isActive: true },
+    });
+    
+    const warningThreshold = thresholds.find(t => t.severity === 'warning');
+    const alertThreshold = thresholds.find(t => t.severity === 'critical');
+    
+    // Analizar datos
+    const values = readings.map(r => Number(r.value));
+    const timestamps = readings.map(r => 
+      r.timestamp instanceof Date ? r.timestamp.getTime() : new Date(r.timestamp).getTime()
+    );
+    
+    // Detectar duplicados
+    const uniqueTs = new Set(timestamps);
+    const duplicateCount = timestamps.length - uniqueTs.size;
+    
+    // Detectar alertas
+    const alertMax = alertThreshold?.thresholdValueMax ? Number(alertThreshold.thresholdValueMax) : null;
+    const alertMin = alertThreshold?.thresholdValueMin ? Number(alertThreshold.thresholdValueMin) : null;
+    
+    let alertPoints = 0;
+    let warningPoints = 0;
+    let normalPoints = 0;
+    
+    for (const v of values) {
+      if ((alertMax !== null && v > alertMax) || (alertMin !== null && v < alertMin)) {
+        alertPoints++;
+      } else if (warningThreshold) {
+        const wMax = warningThreshold.thresholdValueMax ? Number(warningThreshold.thresholdValueMax) : null;
+        const wMin = warningThreshold.thresholdValueMin ? Number(warningThreshold.thresholdValueMin) : null;
+        if ((wMax !== null && v > wMax) || (wMin !== null && v < wMin)) {
+          warningPoints++;
+        } else {
+          normalPoints++;
+        }
+      } else {
+        normalPoints++;
+      }
+    }
+    
+    return {
+      sensorId,
+      range,
+      timestamp: now.toISOString(),
+      dataAnalysis: {
+        totalPoints: readings.length,
+        duplicateTimestamps: duplicateCount,
+        alertPoints,
+        warningPoints,
+        normalPoints,
+        valueRange: values.length > 0 ? {
+          min: Math.min(...values),
+          max: Math.max(...values),
+          avg: values.reduce((a, b) => a + b, 0) / values.length,
+        } : null,
+        timeRange: timestamps.length > 0 ? {
+          from: new Date(Math.min(...timestamps)).toISOString(),
+          to: new Date(Math.max(...timestamps)).toISOString(),
+          spanMinutes: Math.round((Math.max(...timestamps) - Math.min(...timestamps)) / 60000),
+        } : null,
+      },
+      thresholds: {
+        alertMin,
+        alertMax,
+        warningMin: warningThreshold?.thresholdValueMin ? Number(warningThreshold.thresholdValueMin) : null,
+        warningMax: warningThreshold?.thresholdValueMax ? Number(warningThreshold.thresholdValueMax) : null,
+      },
+      sample: readings.slice(0, 5).map(r => ({
+        timestamp: r.timestamp,
+        value: Number(r.value),
+      })),
+      issues: [
+        ...(duplicateCount > 0 ? [`⚠️ ${duplicateCount} duplicate timestamps - may cause stacked points`] : []),
+        ...(alertPoints > 10 ? [`⚠️ ${alertPoints} alert points - may cause visual clutter`] : []),
+        ...(readings.length === 0 ? ['❌ NO DATA for this range'] : []),
+      ],
+    };
+  }
+
+  private parseRangeToMs(range: string): number {
+    const match = range.match(/^(\d+)(m|h|d)$/);
+    if (!match) return 60 * 60 * 1000; // default 1h
+    const value = parseInt(match[1], 10);
+    const unit = match[2];
+    switch (unit) {
+      case 'm': return value * 60 * 1000;
+      case 'h': return value * 60 * 60 * 1000;
+      case 'd': return value * 24 * 60 * 60 * 1000;
+      default: return 60 * 60 * 1000;
+    }
+  }
+
+  /**
    * Ejecuta el mantenimiento de alertas manualmente.
    * Llama a los SPs de auto-resolución y limpieza por TTL.
    */

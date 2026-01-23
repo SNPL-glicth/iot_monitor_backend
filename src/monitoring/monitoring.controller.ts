@@ -345,4 +345,37 @@ export class MonitoringController {
   async runAlertMaintenance() {
     return this.monitoringService.runAlertMaintenance();
   }
+
+  /**
+   * GET /monitoring/debug/telemetry-flow?sensorId=123
+   * 
+   * DIAGNÓSTICO END-TO-END del flujo de telemetría.
+   * Verifica:
+   * 1. ¿Llegan datos al servidor?
+   * 2. ¿Se procesan correctamente?
+   * 3. ¿Formato correcto para Flutter?
+   * 4. ¿Hay datos recientes?
+   */
+  @Get('debug/telemetry-flow')
+  @Roles('admin', 'operator', 'viewer')
+  async debugTelemetryFlow(
+    @Query('sensorId') sensorId?: string,
+  ) {
+    return this.monitoringService.debugTelemetryFlow(sensorId ? Number(sensorId) : undefined);
+  }
+
+  /**
+   * GET /monitoring/debug/chart-data?sensorId=123&range=1h
+   * 
+   * DIAGNÓSTICO: Datos exactos que se envían al chart.
+   * Muestra estructura, conteo, y sample de puntos.
+   */
+  @Get('debug/chart-data')
+  @Roles('admin', 'operator', 'viewer')
+  async debugChartData(
+    @Query('sensorId', ParseIntPipe) sensorId: number,
+    @Query('range') range = '1h',
+  ) {
+    return this.monitoringService.debugChartData(sensorId, range);
+  }
 }

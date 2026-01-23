@@ -7,6 +7,7 @@ import { User } from '../entities/user.entity';
 import { RefreshToken } from '../entities/refresh-token.entity';
 import { PasswordUtil } from '../users/password.util';
 import { durationToMs, getRefreshTokenSecret, sha256Hex } from './auth.utils';
+import { getJwtSecret } from './jwt-secret';
 
 type TokenContext = {
   ip?: string | null;
@@ -142,7 +143,7 @@ export class AuthService {
     };
   }
 
-  // Legacy login for clients that still want Bearer tokens.
+  // Legacy login for clients that still want Bearer tokens (deprecated, use loginBearerWithRefresh).
   async loginBearer(usernameOrEmail: string, password: string) {
     const user = await this.validateUser(usernameOrEmail, password);
     this.logger.log(
@@ -165,6 +166,82 @@ export class AuthService {
 
     return {
       access_token: accessToken,
+      role: user.role,
+      user: { id: user.id, username: user.username, email: user.email, role: user.role },
+    };
+  }
+
+  /**
+   * Login Bearer con refresh token - para Flutter/mobile/scripts.
+   * Retorna AMBOS tokens en el body para que el cliente los persista.
+   */
+  async loginBearerWithRefresh(usernameOrEmail: string, password: string, ctx: TokenContext) {
+    const user = await this.validateUser(usernameOrEmail, password);
+    this.logger.log(
+      `Login OK (bearer+refresh) userId=${user.id} username=${user.username} role=${user.role}`,
+    );
+
+    const pair = await this.issueTokenPair(user, ctx);
+
+    return {
+      access_token: pair.accessToken,
+      refresh_token: pair.refreshToken,
+      access_token_expires_in: Math.floor(pair.accessTokenMaxAgeMs / 1000),
+      refresh_token_expires_in: Math.floor(pair.refreshTokenMaxAgeMs / 1000),
+      role: user.role,
+      user: { id: user.id, username: user.username, email: user.email, role: user.role },
+    };
+  }
+
+  /**
+   * Refresh Bearer token - recibe refresh_token en body, retorna nuevo par.
+   */
+  async refreshBearer(refreshToken: string, ctx: TokenContext) {
+    // 1) Verify JWT signature/type
+    let payload: any;
+    try {
+      payload = await this.jwtService.verifyAsync(refreshToken, {
+        secret: getRefreshTokenSecret(),
+      });
+    } catch {
+      throw new UnauthorizedException('Refresh token inválido');
+    }
+
+    if (!payload || payload.typ !== 'refresh' || !payload.sub) {
+      throw new UnauthorizedException('Refresh token inválido');
+    }
+
+    const tokenHash = sha256Hex(refreshToken);
+
+    // 2) Check DB row
+    const row = await this.refreshRepo.findOne({ where: { tokenHash } });
+    if (!row || row.revokedAt) {
+      throw new UnauthorizedException('Refresh token revocado');
+    }
+
+    if (row.expiresAt.getTime() < Date.now()) {
+      throw new UnauthorizedException('Refresh token expirado');
+    }
+
+    // 3) Load user
+    const user = await this.userRepo.findOne({ where: { id: String(payload.sub) } });
+    if (!user || !user.isActive) {
+      throw new UnauthorizedException('Usuario inválido');
+    }
+
+    // 4) Rotate refresh token
+    const pair = await this.issueTokenPair(user, ctx);
+
+    row.revokedAt = new Date();
+    await this.refreshRepo.save(row);
+
+    this.logger.log(`Token refreshed (bearer) userId=${user.id}`);
+
+    return {
+      access_token: pair.accessToken,
+      refresh_token: pair.refreshToken,
+      access_token_expires_in: Math.floor(pair.accessTokenMaxAgeMs / 1000),
+      refresh_token_expires_in: Math.floor(pair.refreshTokenMaxAgeMs / 1000),
       role: user.role,
       user: { id: user.id, username: user.username, email: user.email, role: user.role },
     };
@@ -226,5 +303,45 @@ export class AuthService {
 
     row.revokedAt = new Date();
     await this.refreshRepo.save(row);
+  }
+
+  /**
+   * DEBUG: Verify a token and return diagnostic info.
+   * Shows what secret is being used and token payload.
+   */
+  async debugVerifyToken(token: string) {
+    const secret = getJwtSecret();
+    const secretPreview = secret.substring(0, 8) + '...' + secret.substring(secret.length - 4);
+    
+    // Decode without verification first to see payload
+    const parts = token.split('.');
+    let decodedPayload: any = null;
+    if (parts.length === 3) {
+      try {
+        decodedPayload = JSON.parse(Buffer.from(parts[1], 'base64').toString());
+      } catch {
+        decodedPayload = 'Could not decode payload';
+      }
+    }
+
+    // Now try to verify
+    let verified = false;
+    let verifyError: string | null = null;
+    try {
+      await this.jwtService.verifyAsync(token, { secret });
+      verified = true;
+    } catch (e) {
+      verifyError = e instanceof Error ? e.message : 'Unknown error';
+    }
+
+    return {
+      verified,
+      secretUsed: secretPreview,
+      secretLength: secret.length,
+      secretSource: process.env.JWT_SECRET ? 'JWT_SECRET env var' : 'fallback (dev)',
+      decodedPayload,
+      verifyError,
+      timestamp: new Date().toISOString(),
+    };
   }
 }

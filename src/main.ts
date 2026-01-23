@@ -37,6 +37,9 @@ async function bootstrap() {
     'http://127.0.0.1:4173',
     'http://localhost:64899',
     'http://127.0.0.1:56854',
+    // Android emulator accede al host via 10.0.2.2
+    'http://10.0.2.2:3000',
+    'http://10.0.2.2',
   ];
 
   const allowedOrigins = corsOrigins.length > 0 ? corsOrigins : defaultDevOrigins;
