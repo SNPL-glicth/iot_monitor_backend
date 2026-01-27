@@ -1,6 +1,128 @@
-<p align="center">
+# iot_monitor_backend
+ 
+ ## Qué hace esta parte del sistema
+ 
+ Este proyecto es el **backend principal** (NestJS + TypeORM + SQL Server) que expone APIs consumidas por el dashboard Flutter.
+ 
+ En el estado actual implementa:
+ 
+ - Autenticación JWT y roles (`admin`, `operator`, `viewer`).
+ - Endpoints de monitoreo (`/monitoring/*`) sobre dispositivos, sensores, lecturas, alertas, predicciones y eventos ML.
+ - Endpoints CRM (`/crm/*`) para pantallas de administración/negocio en el frontend.
+ - Notificaciones (`/notifications/*`) basadas en `dbo.alert_notifications` (SSOT para unread).
+ - Push notifications “best-effort” vía FCM (si hay configuración) y emails para alertas críticas (si hay configuración).
+ - Módulo de inteligencia con utilidades de diagnóstico y conversión de `predictions -> ml_events` en escenarios donde existan predicciones sin evento asociado.
+ 
+ ## Qué problema resuelve
+ 
+ - Centraliza el acceso a datos IoT para la UI:
+   - La app Flutter no consulta la BD directamente.
+ - Provee un contrato HTTP estable para:
+   - Estado (snapshots) y eventos (notificaciones).
+   - Gestión de usuarios.
+ - Simplifica la UI devolviendo payloads ya procesados/filtrados (por ejemplo, `/notifications/unread` aplica prioridad y filtros).
+ 
+ ## Cómo funciona internamente (flujo real)
+ 
+ ### Arranque y CORS
+ 
+ - Entry point: `src/main.ts`.
+ - Carga `.env` via `dotenv/config`.
+ - Habilita:
+   - `cookie-parser` + middleware CSRF.
+   - interceptor global de logging HTTP.
+   - CORS con lista configurable (`CORS_ORIGINS`) y defaults para dev (incluye `http://10.0.2.2:3000`).
+ 
+ ### Notificaciones (unread / mark-read)
+ 
+ - SSOT de notificaciones: `dbo.alert_notifications`.
+ - `GET /notifications/unread`:
+   - Trae notificaciones no leídas.
+   - Ordena por prioridad:
+     - `source='alert'` antes que `source='ml_event'`.
+     - `critical` antes que `warning`.
+     - `created_at` desc.
+   - Filtra sensores por estado operacional (solo `NORMAL`, `WARNING`, `ALERT` o `NULL`).
+ - `POST /notifications/mark-read`:
+   - Actualiza `is_read=1` y `read_at` para una lista de IDs.
+ 
+ ### Push notifications (trigger interno)
+ 
+ - Endpoint interno: `POST /notifications/internal/trigger-push`.
+ - Autenticación: header `X-Internal-Key` debe coincidir con `INTERNAL_API_KEY`.
+ - Casos:
+   - `type='alert'` + `alertId`: envía push/email para alerta crítica.
+   - `type='decision'` + `deviceId` + `title`: envía push “custom” para una decisión.
+ - Envío real:
+   - Push se envía solo si `FCM_SERVER_KEY` está configurada.
+   - Emails críticos se envían solo si `CRITICAL_ALERT_EMAILS` y configuración SMTP están presentes; si falta `SMTP_API_URL`, el backend registra un log `[EMAIL PENDING]`.
+ 
+ ### Inteligencia (ML pipeline)
+ 
+ - Existe lógica de diagnóstico/conversión en `src/intelligence/ml-pipeline.service.ts`:
+   - `diagnosePipeline()` analiza cuántas predicciones tienen o no eventos asociados.
+   - `convertPredictionsToEvents()` toma predicciones sin `ml_events` y crea eventos según reglas (anomalía, riesgo, severidad, umbrales, tendencia).
+ 
+ ## Cómo se comunica con las otras partes
+ 
+ - **SQL Server (`iot_database`)**:
+   - Lee tablas y vistas (dispositivos, sensores, lecturas, alertas, predicciones, eventos ML, notificaciones, etc.).
+   - Escribe:
+     - `alert_notifications` (mark read).
+     - `push_tokens` (registro de tokens FCM).
+     - potencialmente `ml_events` (conversión de predicciones en escenarios de reparación).
+ - **Frontend (`iot_monito_dashboard`)**:
+   - Consume `/auth/*`, `/crm/*`, `/monitoring/*`, `/notifications/*`.
+ - **Ingesta (`iot_ingest_services`)**:
+   - Inserta lecturas en BD; el backend las expone en endpoints de lectura.
+ - **ML (`iot_machine_learning`)**:
+   - Inserta `predictions`/`ml_events`/`alert_notifications`; el backend los expone.
+ - **Worker (`iot_worker`)**:
+   - Puede llamar el endpoint interno de push cuando genera decisiones.
+ 
+ ## Ventajas del enfoque actual
+ 
+ - API central para múltiples vistas del frontend (monitoring + CRM + notificaciones).
+ - Notificaciones desacopladas como tabla (soporta UX de “campanita”).
+ - Push/email son opcionales y no bloquean el sistema si faltan credenciales.
+ 
+ ## Desventajas o limitaciones actuales
+ 
+ - Parte de la lógica de dominio está repartida (SQL + Python + Nest), y el backend incluye lógica “de reparación” del pipeline ML (conversión prediction→event) que puede solaparse con pipelines Python.
+ - Emails vía SMTP no están completamente automatizados si no se configura `SMTP_API_URL`.
+ - El sistema “en tiempo real” en UI depende de polling del frontend.
+ 
+ ## Decisiones técnicas tomadas y por qué
+ 
+ - **TypeORM con `synchronize: false`**: el esquema se gestiona por scripts/migraciones SQL.
+ - **Endpoint interno para push**: permite disparar notificaciones desde workers Python sin JWT.
+ - **SSOT de notificaciones**: `alert_notifications` evita que la UI tenga que deducir unread desde `alerts`/`ml_events`.
+ 
+ ## Qué NO hace esta parte
+ 
+ - No ejecuta ingesta directa desde sensores.
+ - No entrena modelos ML.
+ - No reemplaza `telemetry_iot` (servicio separado de telemetría).
+ 
+ ## Preguntas tipo debate o entrevista
+ 
+ ### ¿Por qué existe un endpoint interno (`/notifications/internal/trigger-push`) y no se usa JWT?
+ 
+ Porque está diseñado para integraciones servicio-a-servicio (por ejemplo, workers Python). El control de acceso actual se hace por `INTERNAL_API_KEY`.
+ 
+ ### ¿Qué pasa si no hay configuración de FCM/SMTP?
+ 
+ - Si falta `FCM_SERVER_KEY`, el backend no envía push (solo loguea).
+ - Si falta `CRITICAL_ALERT_EMAILS` o SMTP, no envía emails.
+ - El flujo principal de monitoreo/unread sigue funcionando.
+ 
+ ---
+ 
+ ## Apéndice: contenido previo del README
+ 
+ <p align="center">
   <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+ </p>
 
 [circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
 [circleci-url]: https://circleci.com/gh/nestjs/nest
