@@ -115,4 +115,8 @@ export class IntelligenceController {
   async getModelStats() {
     return this.mlPipelineService.getModelStats();
   }
+
+  // NOTA: El endpoint /intelligence/ml/diagnostic fue movido al servidor de telemetría
+  // Usar: GET http://localhost:8003/diagnostics/ml/model-status
+  // Esto evita sobrecargar el backend NestJS con consultas pesadas de diagnóstico ML
 }

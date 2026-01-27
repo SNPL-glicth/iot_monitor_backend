@@ -552,4 +552,509 @@ export class MlPipelineService {
       })),
     };
   }
+
+  /**
+   * DIAGNÓSTICO DETALLADO DEL MODELO ML
+   * 
+   * Proporciona métricas de calidad del modelo incluyendo:
+   * - Margen de error (MAE, RMSE)
+   * - Desviación estándar de predicciones
+   * - Tasa de acierto por umbral
+   * - Estado de salud del modelo
+   * - Patrones detectados y su clasificación
+   * - Sensibilidad a micro-cambios
+   * - Lo que el modelo está ignorando y por qué
+   * 
+   * ISO 27001: Este endpoint NO expone datos sensibles,
+   * solo métricas agregadas de rendimiento.
+   */
+  async getModelDiagnostic(): Promise<{
+    timestamp: string;
+    modelHealth: 'healthy' | 'degraded' | 'critical' | 'unknown';
+    healthScore: number;
+    errorMetrics: {
+      mae: number | null;
+      rmse: number | null;
+      mape: number | null;
+      stdDev: number | null;
+      sampleSize: number;
+    };
+    predictionQuality: {
+      avgConfidence: number;
+      lowConfidenceRate: number;
+      highConfidenceRate: number;
+      confidenceDistribution: Record<string, number>;
+    };
+    accuracyMetrics: {
+      withinThreshold5pct: number;
+      withinThreshold10pct: number;
+      withinThreshold20pct: number;
+      totalEvaluated: number;
+    };
+    modelActivity: {
+      predictionsLast1h: number;
+      predictionsLast24h: number;
+      predictionsLast7d: number;
+      avgPredictionsPerHour: number;
+    };
+    anomalyDetection: {
+      totalAnomalies: number;
+      anomalyRate: number;
+      falsePositiveEstimate: number | null;
+    };
+    // NUEVAS MÉTRICAS: Patrones y sensibilidad
+    patternAnalysis: {
+      patternsDetected: Array<{
+        patternType: string;
+        count: number;
+        description: string;
+      }>;
+      dominantPattern: string | null;
+      patternDiversity: number;
+    };
+    microDeltaSensitivity: {
+      totalChanges: number;
+      microChanges: number;
+      microChangeRate: number;
+      sensitivityThreshold: number;
+      ignoredChangesCount: number;
+    };
+    ignoredDataReasons: Array<{
+      reason: string;
+      count: number;
+      description: string;
+    }>;
+    errorMarginAnalysis: {
+      estimatedMarginPct: number;
+      marginConfidence: number;
+      isReliable: boolean;
+      explanation: string;
+    };
+    recommendations: string[];
+    warnings: string[];
+  }> {
+    const warnings: string[] = [];
+    const recommendations: string[] = [];
+
+    // 1. Métricas de error (comparando predicciones con lecturas reales)
+    const errorMetricsResult = await this.dataSource.query(`
+      WITH PredictionAccuracy AS (
+        SELECT 
+          p.id,
+          p.predicted_value,
+          p.target_timestamp,
+          p.confidence,
+          sr.value as actual_value,
+          ABS(CAST(p.predicted_value AS FLOAT) - CAST(sr.value AS FLOAT)) as abs_error,
+          POWER(CAST(p.predicted_value AS FLOAT) - CAST(sr.value AS FLOAT), 2) as squared_error,
+          CASE 
+            WHEN CAST(sr.value AS FLOAT) != 0 
+            THEN ABS(CAST(p.predicted_value AS FLOAT) - CAST(sr.value AS FLOAT)) / ABS(CAST(sr.value AS FLOAT)) * 100
+            ELSE NULL 
+          END as pct_error
+        FROM predictions p
+        INNER JOIN sensor_readings sr ON p.sensor_id = sr.sensor_id
+          AND sr.timestamp BETWEEN DATEADD(minute, -5, p.target_timestamp) 
+                               AND DATEADD(minute, 5, p.target_timestamp)
+        WHERE p.predicted_at > DATEADD(day, -7, GETDATE())
+      )
+      SELECT 
+        COUNT(*) as sample_size,
+        AVG(abs_error) as mae,
+        SQRT(AVG(squared_error)) as rmse,
+        AVG(pct_error) as mape,
+        STDEV(abs_error) as std_dev
+      FROM PredictionAccuracy
+    `);
+
+    const mae = errorMetricsResult[0]?.mae != null ? Number(errorMetricsResult[0].mae) : null;
+    const rmse = errorMetricsResult[0]?.rmse != null ? Number(errorMetricsResult[0].rmse) : null;
+    const mape = errorMetricsResult[0]?.mape != null ? Number(errorMetricsResult[0].mape) : null;
+    const stdDev = errorMetricsResult[0]?.std_dev != null ? Number(errorMetricsResult[0].std_dev) : null;
+    const sampleSize = Number(errorMetricsResult[0]?.sample_size ?? 0);
+
+    // 2. Calidad de predicciones por confianza
+    const confidenceResult = await this.dataSource.query(`
+      SELECT 
+        AVG(CAST(confidence AS FLOAT)) as avg_conf,
+        SUM(CASE WHEN confidence < 0.5 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as low_conf_rate,
+        SUM(CASE WHEN confidence >= 0.8 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as high_conf_rate,
+        SUM(CASE WHEN confidence < 0.3 THEN 1 ELSE 0 END) as conf_0_30,
+        SUM(CASE WHEN confidence >= 0.3 AND confidence < 0.5 THEN 1 ELSE 0 END) as conf_30_50,
+        SUM(CASE WHEN confidence >= 0.5 AND confidence < 0.7 THEN 1 ELSE 0 END) as conf_50_70,
+        SUM(CASE WHEN confidence >= 0.7 AND confidence < 0.9 THEN 1 ELSE 0 END) as conf_70_90,
+        SUM(CASE WHEN confidence >= 0.9 THEN 1 ELSE 0 END) as conf_90_100
+      FROM predictions
+      WHERE predicted_at > DATEADD(day, -7, GETDATE())
+    `);
+
+    const avgConfidence = Number(confidenceResult[0]?.avg_conf ?? 0);
+    const lowConfidenceRate = Number(confidenceResult[0]?.low_conf_rate ?? 0);
+    const highConfidenceRate = Number(confidenceResult[0]?.high_conf_rate ?? 0);
+
+    // 3. Precisión por umbral
+    const accuracyResult = await this.dataSource.query(`
+      WITH PredictionAccuracy AS (
+        SELECT 
+          p.predicted_value,
+          sr.value as actual_value,
+          CASE 
+            WHEN CAST(sr.value AS FLOAT) != 0 
+            THEN ABS(CAST(p.predicted_value AS FLOAT) - CAST(sr.value AS FLOAT)) / ABS(CAST(sr.value AS FLOAT)) * 100
+            ELSE 0 
+          END as pct_error
+        FROM predictions p
+        INNER JOIN sensor_readings sr ON p.sensor_id = sr.sensor_id
+          AND sr.timestamp BETWEEN DATEADD(minute, -5, p.target_timestamp) 
+                               AND DATEADD(minute, 5, p.target_timestamp)
+        WHERE p.predicted_at > DATEADD(day, -7, GETDATE())
+      )
+      SELECT 
+        COUNT(*) as total,
+        SUM(CASE WHEN pct_error <= 5 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as within_5pct,
+        SUM(CASE WHEN pct_error <= 10 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as within_10pct,
+        SUM(CASE WHEN pct_error <= 20 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as within_20pct
+      FROM PredictionAccuracy
+    `);
+
+    // 4. Actividad del modelo
+    const activityResult = await this.dataSource.query(`
+      SELECT 
+        SUM(CASE WHEN predicted_at > DATEADD(hour, -1, GETDATE()) THEN 1 ELSE 0 END) as last_1h,
+        SUM(CASE WHEN predicted_at > DATEADD(hour, -24, GETDATE()) THEN 1 ELSE 0 END) as last_24h,
+        SUM(CASE WHEN predicted_at > DATEADD(day, -7, GETDATE()) THEN 1 ELSE 0 END) as last_7d
+      FROM predictions
+    `);
+
+    const predictionsLast1h = Number(activityResult[0]?.last_1h ?? 0);
+    const predictionsLast24h = Number(activityResult[0]?.last_24h ?? 0);
+    const predictionsLast7d = Number(activityResult[0]?.last_7d ?? 0);
+    const avgPredictionsPerHour = predictionsLast7d / (7 * 24);
+
+    // 5. Detección de anomalías
+    const anomalyResult = await this.dataSource.query(`
+      SELECT 
+        SUM(CASE WHEN is_anomaly = 1 THEN 1 ELSE 0 END) as total_anomalies,
+        COUNT(*) as total,
+        SUM(CASE WHEN is_anomaly = 1 THEN 1 ELSE 0 END) * 100.0 / NULLIF(COUNT(*), 0) as anomaly_rate
+      FROM predictions
+      WHERE predicted_at > DATEADD(day, -7, GETDATE())
+    `);
+
+    const totalAnomalies = Number(anomalyResult[0]?.total_anomalies ?? 0);
+    const anomalyRate = Number(anomalyResult[0]?.anomaly_rate ?? 0);
+
+    // 6. Calcular health score y estado
+    let healthScore = 100;
+    
+    if (sampleSize === 0) {
+      warnings.push('⚠️ No hay datos suficientes para evaluar precisión del modelo');
+      healthScore -= 30;
+    } else {
+      if (mape !== null && mape > 20) {
+        warnings.push(`⚠️ Error porcentual alto: ${mape.toFixed(1)}% (umbral: 20%)`);
+        healthScore -= Math.min(30, mape - 20);
+      }
+      if (mae !== null && stdDev !== null && stdDev > mae * 2) {
+        warnings.push('⚠️ Alta variabilidad en errores - modelo inconsistente');
+        healthScore -= 15;
+      }
+    }
+
+    if (lowConfidenceRate > 30) {
+      warnings.push(`⚠️ ${lowConfidenceRate.toFixed(0)}% de predicciones con baja confianza`);
+      healthScore -= 10;
+    }
+
+    if (predictionsLast1h === 0 && predictionsLast24h > 0) {
+      warnings.push('⚠️ Sin predicciones en la última hora - verificar pipeline');
+      healthScore -= 20;
+    }
+
+    if (anomalyRate > 10) {
+      warnings.push(`⚠️ Tasa de anomalías alta: ${anomalyRate.toFixed(1)}%`);
+      recommendations.push('Revisar umbrales de detección de anomalías');
+    }
+
+    // Recomendaciones basadas en métricas
+    if (avgConfidence < 0.6) {
+      recommendations.push('Considerar aumentar ventana de datos para mejorar confianza');
+    }
+    if (sampleSize < 100) {
+      recommendations.push('Acumular más datos para evaluación estadística robusta');
+    }
+    if (healthScore >= 80) {
+      recommendations.push('✅ Modelo funcionando dentro de parámetros normales');
+    }
+
+    healthScore = Math.max(0, Math.min(100, healthScore));
+
+    let modelHealth: 'healthy' | 'degraded' | 'critical' | 'unknown';
+    if (sampleSize === 0 && predictionsLast7d === 0) {
+      modelHealth = 'unknown';
+    } else if (healthScore >= 80) {
+      modelHealth = 'healthy';
+    } else if (healthScore >= 50) {
+      modelHealth = 'degraded';
+    } else {
+      modelHealth = 'critical';
+    }
+
+    // 7. Análisis de patrones detectados
+    const patternResult = await this.dataSource.query(`
+      WITH RecentReadings AS (
+        SELECT 
+          sr.sensor_id,
+          sr.value,
+          LAG(sr.value) OVER (PARTITION BY sr.sensor_id ORDER BY sr.timestamp) as prev_value,
+          sr.timestamp
+        FROM sensor_readings sr
+        WHERE sr.timestamp > DATEADD(hour, -24, GETDATE())
+      ),
+      DeltaAnalysis AS (
+        SELECT 
+          sensor_id,
+          value,
+          prev_value,
+          ABS(CAST(value AS FLOAT) - CAST(prev_value AS FLOAT)) as delta,
+          CASE 
+            WHEN prev_value IS NOT NULL AND CAST(prev_value AS FLOAT) != 0 
+            THEN ABS(CAST(value AS FLOAT) - CAST(prev_value AS FLOAT)) / ABS(CAST(prev_value AS FLOAT))
+            ELSE 0 
+          END as delta_pct
+        FROM RecentReadings
+        WHERE prev_value IS NOT NULL
+      )
+      SELECT 
+        COUNT(*) as total_changes,
+        SUM(CASE WHEN delta_pct < 0.01 THEN 1 ELSE 0 END) as micro_changes,
+        SUM(CASE WHEN delta_pct >= 0.01 AND delta_pct < 0.05 THEN 1 ELSE 0 END) as small_changes,
+        SUM(CASE WHEN delta_pct >= 0.05 AND delta_pct < 0.10 THEN 1 ELSE 0 END) as medium_changes,
+        SUM(CASE WHEN delta_pct >= 0.10 THEN 1 ELSE 0 END) as large_changes,
+        AVG(delta_pct) * 100 as avg_delta_pct,
+        MAX(delta_pct) * 100 as max_delta_pct
+      FROM DeltaAnalysis
+    `);
+
+    const totalChanges = Number(patternResult[0]?.total_changes ?? 0);
+    const microChanges = Number(patternResult[0]?.micro_changes ?? 0);
+    const smallChanges = Number(patternResult[0]?.small_changes ?? 0);
+    const mediumChanges = Number(patternResult[0]?.medium_changes ?? 0);
+    const largeChanges = Number(patternResult[0]?.large_changes ?? 0);
+    const avgDeltaPct = Number(patternResult[0]?.avg_delta_pct ?? 0);
+    const maxDeltaPct = Number(patternResult[0]?.max_delta_pct ?? 0);
+
+    // Clasificar patrones detectados
+    const patternsDetected: Array<{ patternType: string; count: number; description: string }> = [];
+    
+    if (microChanges > 0) {
+      patternsDetected.push({
+        patternType: 'micro_variation',
+        count: microChanges,
+        description: `Micro-variaciones (<1%): ${microChanges} cambios detectados pero no afectan predicción`,
+      });
+    }
+    if (smallChanges > 0) {
+      patternsDetected.push({
+        patternType: 'small_change',
+        count: smallChanges,
+        description: `Cambios pequeños (1-5%): ${smallChanges} cambios dentro de tolerancia normal`,
+      });
+    }
+    if (mediumChanges > 0) {
+      patternsDetected.push({
+        patternType: 'medium_change',
+        count: mediumChanges,
+        description: `Cambios moderados (5-10%): ${mediumChanges} cambios significativos`,
+      });
+    }
+    if (largeChanges > 0) {
+      patternsDetected.push({
+        patternType: 'spike',
+        count: largeChanges,
+        description: `Spikes (>10%): ${largeChanges} cambios bruscos detectados`,
+      });
+    }
+
+    // Determinar patrón dominante
+    let dominantPattern: string | null = null;
+    if (totalChanges > 0) {
+      const microRate = microChanges / totalChanges;
+      const largeRate = largeChanges / totalChanges;
+      
+      if (microRate > 0.7) {
+        dominantPattern = 'stable';
+        patternsDetected.unshift({
+          patternType: 'stable',
+          count: totalChanges,
+          description: 'Sistema estable: mayoría de cambios son micro-variaciones',
+        });
+      } else if (largeRate > 0.3) {
+        dominantPattern = 'volatile';
+        patternsDetected.unshift({
+          patternType: 'volatile',
+          count: largeChanges,
+          description: 'Sistema volátil: alta frecuencia de cambios bruscos',
+        });
+      } else {
+        dominantPattern = 'normal';
+        patternsDetected.unshift({
+          patternType: 'normal',
+          count: totalChanges,
+          description: 'Comportamiento normal: mezcla de variaciones',
+        });
+      }
+    }
+
+    // Diversidad de patrones (0-1, mayor = más diverso)
+    const patternDiversity = patternsDetected.length > 0 
+      ? Math.min(1, patternsDetected.length / 5) 
+      : 0;
+
+    // 8. Análisis de micro-deltas y sensibilidad
+    const microChangeRate = totalChanges > 0 ? (microChanges / totalChanges) * 100 : 0;
+    const sensitivityThreshold = 1.0; // 1% es el umbral de micro-cambio
+
+    // 9. Razones de datos ignorados
+    const ignoredDataReasons: Array<{ reason: string; count: number; description: string }> = [];
+    
+    if (microChanges > 0) {
+      ignoredDataReasons.push({
+        reason: 'micro_variation_below_threshold',
+        count: microChanges,
+        description: `${microChanges} cambios menores a ${sensitivityThreshold}% no afectan la predicción`,
+      });
+    }
+
+    // Contar valores repetidos
+    const repeatedResult = await this.dataSource.query(`
+      WITH RecentReadings AS (
+        SELECT 
+          value,
+          LAG(value) OVER (ORDER BY timestamp) as prev_value
+        FROM sensor_readings
+        WHERE timestamp > DATEADD(hour, -24, GETDATE())
+      )
+      SELECT COUNT(*) as repeated_count
+      FROM RecentReadings
+      WHERE value = prev_value
+    `);
+    const repeatedCount = Number(repeatedResult[0]?.repeated_count ?? 0);
+    
+    if (repeatedCount > 0) {
+      ignoredDataReasons.push({
+        reason: 'repeated_values',
+        count: repeatedCount,
+        description: `${repeatedCount} valores idénticos consecutivos no aportan información nueva`,
+      });
+    }
+
+    // Contar predicciones sin evento (dentro de rango normal)
+    const withinRangeResult = await this.dataSource.query(`
+      SELECT COUNT(*) as within_range
+      FROM predictions p
+      WHERE p.predicted_at > DATEADD(day, -1, GETDATE())
+        AND NOT EXISTS (
+          SELECT 1 FROM ml_events e 
+          WHERE e.prediction_id = p.id
+        )
+    `);
+    const withinRangeCount = Number(withinRangeResult[0]?.within_range ?? 0);
+    
+    if (withinRangeCount > 0) {
+      ignoredDataReasons.push({
+        reason: 'within_normal_range',
+        count: withinRangeCount,
+        description: `${withinRangeCount} predicciones dentro del rango normal (no generan eventos)`,
+      });
+    }
+
+    // 10. Análisis de margen de error
+    const marginConfidence = sampleSize >= 30 ? 0.95 : sampleSize >= 10 ? 0.7 : 0.3;
+    const estimatedMarginPct = mape !== null ? mape : (stdDev !== null && mae !== null ? (stdDev / mae) * 100 : 0);
+    const isReliable = sampleSize >= 10 && marginConfidence >= 0.7;
+    
+    let marginExplanation = '';
+    if (sampleSize === 0) {
+      marginExplanation = 'Sin datos suficientes para calcular margen de error';
+    } else if (isReliable) {
+      marginExplanation = `Margen de error ±${estimatedMarginPct.toFixed(1)}% basado en ${sampleSize} muestras (confianza ${(marginConfidence * 100).toFixed(0)}%)`;
+    } else {
+      marginExplanation = `Margen estimado ±${estimatedMarginPct.toFixed(1)}% - se requieren más datos para mayor confianza`;
+    }
+
+    // Agregar warnings sobre micro-cambios si es relevante
+    if (microChangeRate > 70) {
+      warnings.push(`⚠️ ${microChangeRate.toFixed(0)}% de cambios son micro-variaciones - el modelo puede parecer "insensible"`);
+      recommendations.push('Los micro-cambios (<1%) no afectan la predicción por diseño. Esto es comportamiento esperado para sensores estables.');
+    }
+
+    if (avgDeltaPct < 1 && totalChanges > 100) {
+      recommendations.push('Sistema muy estable: considerar ajustar umbrales de alerta si se requiere mayor sensibilidad');
+    }
+
+    return {
+      timestamp: new Date().toISOString(),
+      modelHealth,
+      healthScore,
+      errorMetrics: {
+        mae,
+        rmse,
+        mape,
+        stdDev,
+        sampleSize,
+      },
+      predictionQuality: {
+        avgConfidence,
+        lowConfidenceRate,
+        highConfidenceRate,
+        confidenceDistribution: {
+          '0-30%': Number(confidenceResult[0]?.conf_0_30 ?? 0),
+          '30-50%': Number(confidenceResult[0]?.conf_30_50 ?? 0),
+          '50-70%': Number(confidenceResult[0]?.conf_50_70 ?? 0),
+          '70-90%': Number(confidenceResult[0]?.conf_70_90 ?? 0),
+          '90-100%': Number(confidenceResult[0]?.conf_90_100 ?? 0),
+        },
+      },
+      accuracyMetrics: {
+        withinThreshold5pct: Number(accuracyResult[0]?.within_5pct ?? 0),
+        withinThreshold10pct: Number(accuracyResult[0]?.within_10pct ?? 0),
+        withinThreshold20pct: Number(accuracyResult[0]?.within_20pct ?? 0),
+        totalEvaluated: Number(accuracyResult[0]?.total ?? 0),
+      },
+      modelActivity: {
+        predictionsLast1h,
+        predictionsLast24h,
+        predictionsLast7d,
+        avgPredictionsPerHour: Number(avgPredictionsPerHour.toFixed(2)),
+      },
+      anomalyDetection: {
+        totalAnomalies,
+        anomalyRate,
+        falsePositiveEstimate: null,
+      },
+      // NUEVAS MÉTRICAS
+      patternAnalysis: {
+        patternsDetected,
+        dominantPattern,
+        patternDiversity,
+      },
+      microDeltaSensitivity: {
+        totalChanges,
+        microChanges,
+        microChangeRate: Number(microChangeRate.toFixed(2)),
+        sensitivityThreshold,
+        ignoredChangesCount: microChanges + repeatedCount,
+      },
+      ignoredDataReasons,
+      errorMarginAnalysis: {
+        estimatedMarginPct: Number(estimatedMarginPct.toFixed(2)),
+        marginConfidence,
+        isReliable,
+        explanation: marginExplanation,
+      },
+      recommendations,
+      warnings,
+    };
+  }
 }

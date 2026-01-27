@@ -64,6 +64,8 @@ import {
 
 @Injectable()
 export class MonitoringService {
+  private readonly logger = new Logger(MonitoringService.name);
+
   // repositorios principales para leer datos del sistema iot ovbiamente de manera privada y que nadie mas vea xddddd
   constructor(
     @InjectRepository(Device)
@@ -1977,5 +1979,132 @@ export class MonitoringService {
       ...results,
       executedAt: new Date().toISOString(),
     };
+  }
+
+  // ============================================================================
+  // DEV-TOOLS: Métodos para limpieza de datos (solo desarrollo/testing)
+  // ============================================================================
+
+  /**
+   * Elimina TODAS las lecturas de sensores.
+   * PELIGROSO: Solo para desarrollo/testing.
+   * 
+   * ISO 27001: Registra auditoría del usuario que ejecutó la acción.
+   */
+  async deleteAllSensorReadings(userId: string): Promise<{
+    success: boolean;
+    deletedCount: number;
+    executedBy: string;
+    executedAt: string;
+    warning: string;
+  }> {
+    this.logger.warn(`[DEV-TOOLS] User ${userId} is deleting ALL sensor readings`);
+
+    try {
+      // Primero contar cuántas lecturas hay
+      const countResult = await this.dataSource.query(
+        'SELECT COUNT(*) as total FROM sensor_readings'
+      );
+      const totalBefore = Number(countResult[0]?.total ?? 0);
+
+      // Eliminar en orden correcto para respetar FKs
+      // 1. Primero eliminar predicciones (dependen de sensor_readings indirectamente)
+      await this.dataSource.query('DELETE FROM predictions');
+      
+      // 2. Eliminar ml_events (dependen de predictions)
+      await this.dataSource.query('DELETE FROM ml_events');
+      
+      // 3. Eliminar ml_watermarks
+      await this.dataSource.query('DELETE FROM ml_watermarks');
+      
+      // 4. Finalmente eliminar sensor_readings
+      await this.dataSource.query('DELETE FROM sensor_readings');
+
+      this.logger.warn(`[DEV-TOOLS] Deleted ${totalBefore} sensor readings by user ${userId}`);
+
+      return {
+        success: true,
+        deletedCount: totalBefore,
+        executedBy: userId,
+        executedAt: new Date().toISOString(),
+        warning: '⚠️ Todas las lecturas de sensores han sido eliminadas. Esta acción es irreversible.',
+      };
+    } catch (error) {
+      this.logger.error(`[DEV-TOOLS] Error deleting sensor readings: ${(error as Error).message}`);
+      throw new BadRequestException(
+        `Error al eliminar lecturas: ${(error as Error).message}`
+      );
+    }
+  }
+
+  /**
+   * Elimina todas las lecturas de un sensor específico.
+   * ⚠️ PELIGROSO: Solo para desarrollo/testing.
+   * 
+   * ISO 27001: Registra auditoría del usuario que ejecutó la acción.
+   */
+  async deleteSensorReadingsBySensor(sensorId: number, userId: string): Promise<{
+    success: boolean;
+    sensorId: number;
+    deletedCount: number;
+    executedBy: string;
+    executedAt: string;
+  }> {
+    this.logger.warn(`[DEV-TOOLS] User ${userId} is deleting readings for sensor ${sensorId}`);
+
+    // Verificar que el sensor existe
+    const sensor = await this.sensorRepo.findOne({ where: { id: String(sensorId) } });
+    if (!sensor) {
+      throw new NotFoundException(`Sensor ${sensorId} no encontrado`);
+    }
+
+    try {
+      // Contar lecturas antes
+      const countResult = await this.dataSource.query(
+        'SELECT COUNT(*) as total FROM sensor_readings WHERE sensor_id = @0',
+        [sensorId]
+      );
+      const totalBefore = Number(countResult[0]?.total ?? 0);
+
+      // Eliminar en orden correcto para respetar FKs
+      // 1. Eliminar predicciones del sensor
+      await this.dataSource.query(
+        'DELETE FROM predictions WHERE sensor_id = @0',
+        [sensorId]
+      );
+      
+      // 2. Eliminar ml_events del sensor
+      await this.dataSource.query(
+        'DELETE FROM ml_events WHERE sensor_id = @0',
+        [sensorId]
+      );
+      
+      // 3. Eliminar ml_watermarks del sensor
+      await this.dataSource.query(
+        'DELETE FROM ml_watermarks WHERE sensor_id = @0',
+        [sensorId]
+      );
+      
+      // 4. Eliminar sensor_readings del sensor
+      await this.dataSource.query(
+        'DELETE FROM sensor_readings WHERE sensor_id = @0',
+        [sensorId]
+      );
+
+      this.logger.warn(`[DEV-TOOLS] Deleted ${totalBefore} readings for sensor ${sensorId} by user ${userId}`);
+
+      return {
+        success: true,
+        sensorId,
+        deletedCount: totalBefore,
+        executedBy: userId,
+        executedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      this.logger.error(`[DEV-TOOLS] Error deleting readings for sensor ${sensorId}: ${(error as Error).message}`);
+      throw new BadRequestException(
+        `Error al eliminar lecturas del sensor ${sensorId}: ${(error as Error).message}`
+      );
+    }
   }
 }

@@ -378,4 +378,43 @@ export class MonitoringController {
   ) {
     return this.monitoringService.debugChartData(sensorId, range);
   }
+
+  // ============================================================================
+  // DEV-TOOLS: Endpoints para limpieza de datos (solo admin, solo desarrollo)
+  // ============================================================================
+
+  /**
+   * DELETE /monitoring/dev-tools/sensor-readings/all
+   * 
+   * Elimina TODAS las lecturas de sensores.
+   * ⚠️ PELIGROSO: Solo para desarrollo/testing.
+   * 
+   * ISO 27001: Requiere rol admin y deja log de auditoría.
+   */
+  @Delete('dev-tools/sensor-readings/all')
+  @Roles('admin')
+  @HttpCode(HttpStatus.OK)
+  async deleteAllSensorReadings(@Req() req: any) {
+    const userId = req.user?.id || req.user?.sub || 'unknown';
+    return this.monitoringService.deleteAllSensorReadings(userId);
+  }
+
+  /**
+   * DELETE /monitoring/dev-tools/sensor-readings/sensor/:sensorId
+   * 
+   * Elimina todas las lecturas de un sensor específico.
+   * ⚠️ PELIGROSO: Solo para desarrollo/testing.
+   * 
+   * ISO 27001: Requiere rol admin y deja log de auditoría.
+   */
+  @Delete('dev-tools/sensor-readings/sensor/:sensorId')
+  @Roles('admin')
+  @HttpCode(HttpStatus.OK)
+  async deleteSensorReadingsBySensor(
+    @Param('sensorId', ParseIntPipe) sensorId: number,
+    @Req() req: any,
+  ) {
+    const userId = req.user?.id || req.user?.sub || 'unknown';
+    return this.monitoringService.deleteSensorReadingsBySensor(sensorId, userId);
+  }
 }
