@@ -1,4 +1,4 @@
-import { Controller, Get, Param, ParseIntPipe, Query, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, ParseIntPipe, Query, UseGuards, Logger } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
 import { Roles } from '../auth/roles.decorator';
 import { RolesGuard } from '../auth/roles.guard';
@@ -10,6 +10,8 @@ import { MonitoringService } from './monitoring.service';
 @UseGuards(AuthGuard('jwt'), RolesGuard, RateLimitGuard)
 @Controller('sensors')
 export class SensorStatusController {
+  private readonly logger = new Logger(SensorStatusController.name);
+
   constructor(private readonly monitoringService: MonitoringService) {}
 
   // Perf 2.1: Endpoint batch para eliminar N+1 queries en Flutter
@@ -42,12 +44,37 @@ export class SensorStatusController {
     return this.monitoringService.getSensorThresholdsCanonical(sensorId);
   }
 
+  /**
+   * @deprecated FASE 1 CORRECCIÓN ARQUITECTÓNICA
+   * 
+   * Este endpoint está DEPRECADO y será eliminado en una versión futura.
+   * 
+   * VIOLACIÓN DE CONTRATO:
+   * - Backend NestJS NO debe alimentar gráficas de sensores
+   * - Telemetría (:8099) es la FUENTE CANÓNICA para visualización
+   * 
+   * MIGRACIÓN REQUERIDA:
+   * - Flutter debe consumir: GET /telemetry/sensors/:id/trading
+   * - Flutter debe consumir: GET /telemetry/sensors/:id/metrics
+   * 
+   * Este endpoint se mantiene temporalmente para:
+   * - Evitar regresiones durante la transición
+   * - Permitir migración gradual de clientes
+   * 
+   * FECHA DE DEPRECACIÓN: 2024-01
+   * FECHA DE ELIMINACIÓN ESTIMADA: 2024-03
+   */
   @Get(':sensorId/dashboard')
   @Roles('admin', 'operator', 'viewer')
   getSensorDashboard(
     @Param('sensorId', ParseIntPipe) sensorId: number,
     @Query('range') range = '6h',
   ) {
+    // WARNING: Endpoint deprecado - registrar uso para monitoreo de migración
+    this.logger.warn(
+      `[DEPRECATED] GET /sensors/${sensorId}/dashboard llamado. ` +
+      `Migrar a Telemetría: GET /telemetry/sensors/${sensorId}/trading`,
+    );
     return this.monitoringService.getSensorDashboard(sensorId, range);
   }
 }
