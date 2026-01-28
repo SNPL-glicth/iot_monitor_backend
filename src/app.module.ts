@@ -37,6 +37,8 @@ import { CrmModule } from './crm/crm.module';
 import { NotificationsModule } from './notifications/notifications.module';
 import { IntelligenceModule } from './intelligence/intelligence.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
+import { AlertEventsModule } from './alerts/alert-events.module';
+import { AlertEvent } from './entities/alert-event.entity';
 
 @Module({
   imports: [
@@ -73,6 +75,7 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
         RefreshToken,
         AlertNotification,
         DeviceApiKey,
+        AlertEvent,
         DeviceWithSensorsView,
         ActiveAlertView,
         LatestSensorReadingView,
@@ -91,6 +94,7 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
     NotificationsModule,
     IntelligenceModule,
     ProvisioningModule,
+    AlertEventsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

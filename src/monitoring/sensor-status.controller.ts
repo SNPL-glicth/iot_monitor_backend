@@ -30,7 +30,7 @@ export class SensorStatusController {
   }
 
   @Get(':sensorId/metrics')
-  @Roles('admin', 'operator', 'viewer')
+  @Roles('admin', 'operator', 'viewer') 
   getSensorMetrics(
     @Param('sensorId', ParseIntPipe) sensorId: number,
     @Query('window') window = '1h',

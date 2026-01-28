@@ -168,8 +168,8 @@ export class NotificationsService {
       }
     >
   > {
-    // OPTIMIZACIÓN: Query simplificada sin CTEs para evitar timeouts
-    // Las reglas de filtrado se aplican con JOINs más eficientes
+    // FIX: Query actualizada para incluir alert_events (nueva tabla de historial)
+    // Ahora soporta 3 fuentes: 'alert', 'ml_event', 'alert_event'
     const rows = await this.dataSource.query(
       `
       SELECT TOP (@0)
@@ -181,36 +181,45 @@ export class NotificationsService {
         n.message,
         n.is_read AS isRead,
         n.created_at AS createdAt,
-        COALESCE(a.sensor_id, me.sensor_id) AS sensorId,
-        COALESCE(s1.name, s2.name) AS sensorName,
-        COALESCE(d1.name, d2.name) AS deviceName,
-        COALESCE(s1.operational_state, s2.operational_state) AS operationalState,
+        COALESCE(ae.sensor_id, a.sensor_id, me.sensor_id) AS sensorId,
+        COALESCE(s1.name, s2.name, s3.name) AS sensorName,
+        COALESCE(d1.name, d2.name, d3.name) AS deviceName,
+        COALESCE(s1.operational_state, s2.operational_state, s3.operational_state) AS operationalState,
+        ae.event_type AS eventType,
+        ae.triggered_value AS triggeredValue,
         CASE 
-          WHEN n.source = 'alert' AND n.severity = 'critical' THEN 0
-          WHEN n.source = 'alert' AND n.severity = 'warning' THEN 1
-          WHEN n.source = 'alert' THEN 2
+          WHEN n.source = 'alert_event' AND n.severity = 'critical' THEN 0
+          WHEN n.source = 'alert' AND n.severity = 'critical' THEN 1
+          WHEN n.source = 'alert_event' AND n.severity = 'warning' THEN 2
+          WHEN n.source = 'alert' AND n.severity = 'warning' THEN 3
+          WHEN n.source = 'alert' THEN 4
           WHEN n.source = 'ml_event' THEN 10
           ELSE 20
         END AS priority
       FROM dbo.alert_notifications n WITH (NOLOCK)
+      LEFT JOIN dbo.alert_events ae WITH (NOLOCK)
+        ON n.source = 'alert_event' AND ae.id = n.source_event_id
       LEFT JOIN dbo.alerts a WITH (NOLOCK)
         ON n.source = 'alert' AND a.id = n.source_event_id
       LEFT JOIN dbo.ml_events me WITH (NOLOCK)
         ON n.source = 'ml_event' AND me.id = n.source_event_id
       LEFT JOIN dbo.sensors s1 WITH (NOLOCK)
-        ON s1.id = a.sensor_id
+        ON s1.id = ae.sensor_id
       LEFT JOIN dbo.sensors s2 WITH (NOLOCK)
-        ON s2.id = me.sensor_id
+        ON s2.id = a.sensor_id
+      LEFT JOIN dbo.sensors s3 WITH (NOLOCK)
+        ON s3.id = me.sensor_id
       LEFT JOIN dbo.devices d1 WITH (NOLOCK)
-        ON d1.id = a.device_id
+        ON d1.id = ae.device_id
       LEFT JOIN dbo.devices d2 WITH (NOLOCK)
-        ON d2.id = me.device_id
+        ON d2.id = a.device_id
+      LEFT JOIN dbo.devices d3 WITH (NOLOCK)
+        ON d3.id = me.device_id
       WHERE n.is_read = 0
-        -- Filtro simple: sensores en estado válido o sin sensor
         AND (
-          COALESCE(s1.operational_state, s2.operational_state) IN ('NORMAL', 'WARNING', 'ALERT')
-          OR COALESCE(s1.operational_state, s2.operational_state) IS NULL
-          OR COALESCE(a.sensor_id, me.sensor_id) IS NULL
+          COALESCE(s1.operational_state, s2.operational_state, s3.operational_state) IN ('NORMAL', 'WARNING', 'ALERT')
+          OR COALESCE(s1.operational_state, s2.operational_state, s3.operational_state) IS NULL
+          OR COALESCE(ae.sensor_id, a.sensor_id, me.sensor_id) IS NULL
         )
       ORDER BY priority ASC, n.created_at DESC
       `,
