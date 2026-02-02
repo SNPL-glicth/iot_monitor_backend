@@ -846,11 +846,10 @@ export class ProvisioningService {
   }
 
   /**
-   * Elimina un sensor (soft delete o hard delete según estado)
-   * Permite eliminar si:
-   * - Sensor está inactivo (isActive: false)
-   * - Sensor está en estados: draft, pending_claim, pending_confirmation
-   * - Dispositivo está offline
+   * Elimina un sensor (soft delete)
+   * 
+   * Permite eliminar en cualquier estado.
+   * El sensor se marca como revocado automáticamente.
    */
   async deleteSensor(sensorId: string): Promise<{ message: string }> {
     const sensor = await this.sensorRepo.findOne({
@@ -862,26 +861,7 @@ export class ProvisioningService {
       throw new NotFoundException(`Sensor ${sensorId} no encontrado`);
     }
 
-    const allowedStates = ['draft', 'pending_claim', 'pending_confirmation', 'revoked'];
-    const currentStatus = (sensor.status || '').toLowerCase();
-    const deviceStatus = (sensor.device?.status || '').toLowerCase();
-    const isDeviceOnline = deviceStatus === 'online';
-    
-    // Permitir eliminar si:
-    // 1. Sensor está inactivo, O
-    // 2. Status está en estados permitidos, O
-    // 3. Dispositivo está offline
-    const canDelete = !sensor.isActive || 
-                      allowedStates.includes(currentStatus) || 
-                      !isDeviceOnline;
-
-    if (!canDelete) {
-      throw new BadRequestException(
-        `No se puede eliminar un sensor activo mientras el dispositivo está online. ` +
-        `Desactive el sensor primero o espere a que el dispositivo esté offline.`
-      );
-    }
-
+    // Ya no bloqueamos - permitimos eliminar en cualquier estado
     // Soft delete: marcar como revocado
     await this.sensorRepo.update(sensorId, {
       isActive: false,
@@ -921,9 +901,8 @@ export class ProvisioningService {
   /**
    * Elimina un dispositivo (soft delete)
    * 
-   * Permite eliminar si:
-   * - Dispositivo está en estados: draft, pending_activation, offline
-   * - No tiene sensores activos online
+   * Permite eliminar en cualquier estado.
+   * Los sensores activos se desactivan automáticamente.
    */
   async deleteDevice(deviceId: string): Promise<{ message: string }> {
     const device = await this.deviceRepo.findOne({
@@ -935,22 +914,8 @@ export class ProvisioningService {
       throw new NotFoundException(`Dispositivo ${deviceId} no encontrado`);
     }
 
-    const allowedStates = ['draft', 'pending_activation', 'offline', 'error', 'deleted'];
-    const currentStatus = (device.status || '').toLowerCase();
-    
-    // Verificar si hay sensores activos online
-    const activeSensorsOnline = (device.sensors || []).filter(
-      s => s.isActive && s.status === 'online'
-    );
-
-    const canDelete = allowedStates.includes(currentStatus) || activeSensorsOnline.length === 0;
-
-    if (!canDelete) {
-      throw new BadRequestException(
-        `No se puede eliminar un dispositivo con sensores activos online. ` +
-        `Desactive los sensores primero o espere a que estén offline.`
-      );
-    }
+    // Ya no bloqueamos - permitimos eliminar en cualquier estado
+    // Los sensores se desactivarán automáticamente en la transacción
 
     // Soft delete: marcar dispositivo y todos sus sensores como revocados
     const queryRunner = this.dataSource.createQueryRunner();

@@ -995,28 +995,31 @@ export class CrmService {
       alertQueue,
       recentEvents,
     } = await this.withReadUncommittedRetry(async (manager) => {
-      // KPIs: dispositivos por status
+      // KPIs: dispositivos por status (excluyendo deleted)
       const devicesByStatus = await manager.query(
         `
         SELECT d.status, COUNT(1) AS cnt
         FROM devices d WITH (NOLOCK)
+        WHERE d.status != 'deleted'
         GROUP BY d.status
         `,
         [],
       );
 
-      // KPIs: alertas activas por severidad (estado actual)
+      // KPIs: alertas activas por severidad (excluyendo dispositivos deleted)
       const activeAlertsBySeverity = await manager.query(
         `
         SELECT a.severity, COUNT(1) AS cnt
         FROM alerts a WITH (NOLOCK)
+        JOIN devices d WITH (NOLOCK) ON d.id = a.device_id
         WHERE a.status IN ('active', 'acknowledged')
+          AND d.status != 'deleted'
         GROUP BY a.severity
         `,
         [],
       );
 
-      // Top devices por # alertas activas
+      // Top devices por # alertas activas (excluyendo deleted)
       const topDevicesByActiveAlerts = await manager.query(
         `
         SELECT TOP (${topDevicesLimit})
@@ -1027,26 +1030,29 @@ export class CrmService {
         FROM alerts a WITH (NOLOCK)
         JOIN devices d WITH (NOLOCK) ON d.id = a.device_id
         WHERE a.status IN ('active', 'acknowledged')
+          AND d.status != 'deleted'
         GROUP BY a.device_id, d.device_uuid, d.name
         ORDER BY COUNT(1) DESC, d.name ASC
         `,
         [],
       );
 
-      // Alert queue: últimas alertas activas/ack (filtrado por rango opcional)
+      // Alert queue: últimas alertas activas/ack (excluyendo deleted)
       const alertQueue = await manager.query(
         `
-        SELECT TOP (${alertsLimit}) *
-        FROM v_alerts_history WITH (NOLOCK)
-        WHERE status IN ('active', 'acknowledged')
-          AND triggered_at >= @0
-          AND triggered_at <= @1
-        ORDER BY triggered_at DESC
+        SELECT TOP (${alertsLimit}) ah.*
+        FROM v_alerts_history ah WITH (NOLOCK)
+        JOIN devices d WITH (NOLOCK) ON d.id = ah.device_id
+        WHERE ah.status IN ('active', 'acknowledged')
+          AND ah.triggered_at >= @0
+          AND ah.triggered_at <= @1
+          AND d.status != 'deleted'
+        ORDER BY ah.triggered_at DESC
         `,
         [from, to],
       );
 
-      // Timeline global: últimos eventos (filtrado por rango)
+      // Timeline global: últimos eventos (excluyendo deleted)
       const recentEvents = await manager.query(
         `
         SELECT TOP (${eventsLimit})
@@ -1063,6 +1069,7 @@ export class CrmService {
         JOIN devices d WITH (NOLOCK) ON d.id = t.device_id
         WHERE t.occurred_at >= @0
           AND t.occurred_at <= @1
+          AND d.status != 'deleted'
         ORDER BY t.occurred_at DESC
         `,
         [from, to],
