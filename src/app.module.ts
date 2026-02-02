@@ -39,6 +39,7 @@ import { IntelligenceModule } from './intelligence/intelligence.module';
 import { ProvisioningModule } from './provisioning/provisioning.module';
 import { AlertEventsModule } from './alerts/alert-events.module';
 import { AlertEvent } from './entities/alert-event.entity';
+import { MqttModule } from './mqtt/mqtt.module';
 
 @Module({
   imports: [
@@ -95,6 +96,7 @@ import { AlertEvent } from './entities/alert-event.entity';
     IntelligenceModule,
     ProvisioningModule,
     AlertEventsModule,
+    MqttModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -1,8 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { Repository } from 'typeorm';
+import { AlertPublisher } from '../mqtt/alert.publisher';
 
 import { RegisterDeviceDto, AlertPushPayload } from './notifications.dto';
 import { UserDevice } from '../entities/user-device.entity';
@@ -57,6 +58,7 @@ export class NotificationsService {
     private readonly sensorRepo: Repository<Sensor>,
     private readonly dataSource: DataSource,
     private readonly http: HttpService,
+    @Optional() private readonly alertPublisher?: AlertPublisher,
   ) {}
 
   async registerDevice(userId: string, dto: RegisterDeviceDto): Promise<void> {
@@ -143,6 +145,42 @@ export class NotificationsService {
     };
 
     await this.sendFcm(tokens, payload);
+
+    // MQTT: Publicar alerta para entrega instantánea
+    if (this.alertPublisher?.isEnabled) {
+      const sensor = await this.sensorRepo.findOne({ where: { id: alert.sensorId } });
+      
+      await this.alertPublisher.publishThresholdAlert({
+        id: String(alert.id),
+        sensorId: String(alert.sensorId),
+        severity: sev,
+        triggeredValue: typeof alert.triggeredValue === 'number' ? alert.triggeredValue : null,
+        message: body,
+        deviceId: String(alert.deviceId),
+        deviceName: device.name,
+        sensorName: sensor?.name,
+      });
+
+      // Publicar notificaciones a usuarios asociados
+      const userDevices = await this.userDeviceRepo.find({
+        where: { deviceId: String(alert.deviceId) },
+      });
+      const userIds = userDevices.map((ud) => ud.userId);
+
+      for (const userId of userIds) {
+        await this.alertPublisher.publishNotification({
+          id: `alert-${alert.id}-${userId}`,
+          userId,
+          source: 'alert',
+          severity: sev,
+          title,
+          message: body,
+          sensorId: String(alert.sensorId),
+          sensorName: sensor?.name,
+          deviceName: device.name,
+        });
+      }
+    }
   }
 
   /**
@@ -337,6 +375,20 @@ export class NotificationsService {
 
     // 1. Enviar push notification
     await this.sendAlertNotification(alertId);
+
+    // 1.5. MQTT: Publicar alerta crítica a broadcast
+    if (this.alertPublisher?.isEnabled) {
+      await this.alertPublisher.publishCriticalBroadcast({
+        id: String(alert.id),
+        sensorId: String(alert.sensorId),
+        severity: 'critical',
+        triggeredValue: typeof alert.triggeredValue === 'number' ? alert.triggeredValue : null,
+        message: `Alerta crítica en ${device.name}`,
+        deviceId: String(alert.deviceId),
+        deviceName: device.name,
+        sensorName: sensor?.name,
+      });
+    }
 
     // 2. Enviar emails urgentes (máximo 2 destinatarios)
     await this.sendCriticalEmails(alert, device, sensor);
