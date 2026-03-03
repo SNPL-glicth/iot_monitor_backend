@@ -148,11 +148,15 @@ export class MonitoringService {
         throw new BadRequestException('El mínimo no puede ser mayor al máximo.');
       }
     } else {
-      // greater_than / less_than / equal_to
+      // greater_than / less_than / equal_to — solo usan min como valor umbral
       if (min === null) {
         throw new BadRequestException('Debes indicar el valor del límite.');
       }
     }
+
+    // Coherencia semántica: greater_than/less_than/equal_to solo usan min.
+    // Forzar max=null para evitar que el SP evalúe COALESCE(min, max) incorrectamente.
+    const effectiveMax = condition === 'out_of_range' ? max : null;
 
     const bounds = this.getLimitBounds(args.sensorType, args.unit);
 
@@ -166,9 +170,9 @@ export class MonitoringService {
     };
 
     if (min !== null) checkOne('Valor', min);
-    if (max !== null) checkOne('Valor', max);
+    if (effectiveMax !== null) checkOne('Valor', effectiveMax);
 
-    return { min, max, conditionType: condition };
+    return { min, max: effectiveMax, conditionType: condition };
   }
 
   // convierte fechas a un texto sencillo para mostrar en el dashboard normalmente seria lo indicado ya que el front solo toma los datos directamente 
