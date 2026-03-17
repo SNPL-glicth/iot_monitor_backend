@@ -268,6 +268,23 @@ export class MonitoringController {
     return this.monitoringService.deleteSensor(sensorId);
   }
 
+  @Get('debug/chart-data/:sensorId')
+  @Roles('admin')
+  debugChartData(@Param('sensorId', ParseIntPipe) sensorId: number) {
+    return this.monitoringService.debugChartData(sensorId);
+  }
+
+  /**
+   * Fix: Endpoint de debug para diagnosticar sensores bloqueados
+   * Muestra por qué un sensor no es visible en las vistas
+   * @param sensorId ID del sensor a diagnosticar
+   */
+  @Get('debug/sensors/:sensorId')
+  @Roles('admin')
+  async debugSensor(@Param('sensorId', ParseIntPipe) sensorId: number) {
+    return this.monitoringService.debugSensor(sensorId);
+  }
+
   /**
    * GET /monitoring/sensors/:sensorId/raw-readings?limit=500&since=ISO_DATE
    * 

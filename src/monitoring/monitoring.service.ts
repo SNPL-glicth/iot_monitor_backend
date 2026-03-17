@@ -175,8 +175,24 @@ export class MonitoringService {
     return { min, max: effectiveMax, conditionType: condition };
   }
 
-  // convierte fechas a un texto sencillo para mostrar en el dashboard normalmente seria lo indicado ya que el front solo toma los datos directamente 
+  /**
+   * Fix M-1 | 2026-03-12 | Formatea fechas en ISO-8601 estándar
+   * Migrado de DD/MM/YYYY HH:MM a ISO-8601 para compatibilidad universal
+   */
   private formatDateTime(value: Date | string | null): string | null {
+    if (!value) {
+      return null;
+    }
+
+    const date = typeof value === 'string' ? new Date(value) : value;
+    return date.toISOString();  // ISO-8601: "2026-03-12T02:27:30.000Z"
+  }
+
+  /**
+   * @deprecated Usar formatDateTime() que ahora retorna ISO-8601
+   * Mantiene formato legacy DD/MM/YYYY HH:MM para clientes antiguos si es necesario
+   */
+  private formatDateTimeLegacy(value: Date | string | null): string | null {
     if (!value) {
       return null;
     }
@@ -837,6 +853,97 @@ export class MonitoringService {
   }
 
   /**
+   * Fix | 2026-03-12 | Endpoint de debug para diagnosticar sensores
+   * Verifica por qué un sensor no es visible en vistas SQL
+   */
+  async debugSensor(sensorId: number) {
+    const sensor = await this.sensorRepo.findOne({
+      where: { id: String(sensorId) },
+      relations: ['device'],
+    });
+
+    if (!sensor) {
+      return {
+        found: false,
+        message: 'Sensor no encontrado en la tabla sensors',
+      };
+    }
+
+    const readingsCount = await this.sensorReadingRepo.count({
+      where: { sensor: { id: String(sensorId) } },
+    });
+
+    const inLatestReadingsView = await this.latestSensorReadingViewRepo.findOne({
+      where: { sensorId: String(sensorId) },
+    });
+
+    const inConsolidatedView = await this.sensorConsolidatedStatusViewRepo.findOne({
+      where: { sensorId: String(sensorId) },
+    });
+
+    const blockers = {
+      isActive: !sensor.isActive,
+      isInitializing: sensor.operationalState === 'INITIALIZING',
+      isRevoked: sensor.status === 'revoked',
+      isDraft: sensor.status === 'draft',
+      deviceDeleted: sensor.device?.deletedAt !== null && sensor.device?.deletedAt !== undefined,
+      noReadings: readingsCount === 0,
+    };
+
+    const isBlocked = Object.values(blockers).some(b => b);
+
+    return {
+      found: true,
+      sensor: {
+        id: sensor.id,
+        name: sensor.name,
+        isActive: sensor.isActive,
+        status: sensor.status,
+        operationalState: sensor.operationalState,
+        validReadingsCount: sensor.validReadingsCount,
+        minReadingsForNormal: sensor.minReadingsForNormal,
+        deviceId: sensor.device?.id,
+        deviceStatus: sensor.device?.status,
+      },
+      readingsCount,
+      visibleInViews: {
+        latestReadings: !!inLatestReadingsView,
+        consolidated: !!inConsolidatedView,
+      },
+      blockers,
+      isBlocked,
+      diagnosis: this.generateDiagnosis(blockers, sensor, readingsCount),
+    };
+  }
+
+  private generateDiagnosis(blockers: any, sensor: any, readingsCount: number): string {
+    const reasons: string[] = [];  // Fix: Tipar explícitamente
+    
+    if (blockers.isActive) {
+      reasons.push('❌ is_active=false → filtrado por vistas SQL');
+    }
+    if (blockers.isInitializing) {
+      const progress = `${sensor.validReadingsCount}/${sensor.minReadingsForNormal}`;
+      reasons.push(`⚠️ operational_state=INITIALIZING → necesita ${progress} lecturas válidas`);
+    }
+    if (blockers.isRevoked) {
+      reasons.push('❌ status=revoked → sensor desactivado permanentemente');
+    }
+    if (blockers.isDraft) {
+      reasons.push('⚠️ status=draft → sensor no activado aún');
+    }
+    if (blockers.noReadings) {
+      reasons.push('⚠️ Sin lecturas en sensor_readings → no hay datos para mostrar');
+    }
+
+    if (reasons.length === 0) {
+      return '✅ Sensor debería ser visible. Si no aparece en Flutter, verificar cache.';
+    }
+
+    return reasons.join('\n');
+  }
+
+  /**
    * Métricas agregadas del sensor en una ventana de tiempo.
    */
   async getSensorMetrics(sensorId: number, window = '1h') {
@@ -857,14 +964,23 @@ export class MonitoringService {
     const hours = windowMap[window] || 1;
     const since = new Date(Date.now() - hours * 60 * 60 * 1000);
 
-    const readings = await this.sensorReadingRepo
-      .createQueryBuilder('r')
-      .where('r.sensor_id = :sensorId', { sensorId: String(sensorId) })
-      .andWhere('r.timestamp >= :since', { since })
-      .orderBy('r.timestamp', 'ASC')
-      .getMany();
+    // FIX PERF: Compute aggregates via raw SQL to avoid fetching all rows into memory.
+    // Before this fix, a 7d window could fetch 10K+ rows (~1MB+) just to compute min/max/avg.
+    const aggResult = await this.dataSource.query(
+      `SELECT
+         COUNT(*) AS cnt,
+         MIN(CAST(value AS FLOAT)) AS min_val,
+         MAX(CAST(value AS FLOAT)) AS max_val,
+         AVG(CAST(value AS FLOAT)) AS avg_val
+       FROM sensor_readings WITH (NOLOCK)
+       WHERE sensor_id = @0 AND [timestamp] >= @1`,
+      [sensorId, since],
+    );
 
-    if (readings.length === 0) {
+    const agg = aggResult?.[0];
+    const count = Number(agg?.cnt ?? 0);
+
+    if (count === 0) {
       return {
         sensorId,
         window,
@@ -876,18 +992,27 @@ export class MonitoringService {
       };
     }
 
-    const values = readings.map((r) => Number(r.value));
-    const min = Math.min(...values);
-    const max = Math.max(...values);
-    const avg = values.reduce((a, b) => a + b, 0) / values.length;
+    // FIX PERF: Only fetch the most recent 500 readings for the response payload.
+    // This caps response size at ~50KB instead of potentially 10MB+.
+    const maxReadings = 500;
+    const readings = await this.sensorReadingRepo
+      .createQueryBuilder('r')
+      .where('r.sensor_id = :sensorId', { sensorId: String(sensorId) })
+      .andWhere('r.timestamp >= :since', { since })
+      .orderBy('r.timestamp', 'DESC')
+      .take(maxReadings)
+      .getMany();
+
+    // Reverse to ASC order for client consumption
+    readings.reverse();
 
     return {
       sensorId,
       window,
-      count: readings.length,
-      min,
-      max,
-      avg: Math.round(avg * 100) / 100,
+      count,
+      min: agg.min_val !== null ? Number(agg.min_val) : null,
+      max: agg.max_val !== null ? Number(agg.max_val) : null,
+      avg: agg.avg_val !== null ? Math.round(Number(agg.avg_val) * 100) / 100 : null,
       readings: readings.map((r) => ({
         value: r.value,
         timestamp: this.formatDateTime(r.timestamp),
@@ -1242,12 +1367,15 @@ export class MonitoringService {
       order: { timestamp: 'DESC' },
     });
 
-    // Lecturas en el rango
+    // FIX PERF: Cap readings to prevent unbounded fetches.
+    // A 7d window at 1 reading/min = 10,080 rows. Cap at 2000 for charting.
+    const maxSeriesPoints = 2000;
     const readings = await this.sensorReadingRepo
       .createQueryBuilder('r')
       .where('r.sensor_id = :sensorId', { sensorId: String(sensorId) })
       .andWhere('r.timestamp >= :since', { since })
       .orderBy('r.timestamp', 'ASC')
+      .take(maxSeriesPoints)
       .getMany();
 
     // Lectura inicial (antes del rango) para baseline
@@ -1843,12 +1971,13 @@ export class MonitoringService {
     const rangeMs = this.parseRangeToMs(range);
     const since = new Date(now.getTime() - rangeMs);
     
-    // Obtener lecturas crudas
+    // FIX PERF: Cap debug readings to prevent unbounded fetches
     const readings = await this.sensorReadingRepo
       .createQueryBuilder('r')
       .where('r.sensor_id = :sensorId', { sensorId: String(sensorId) })
       .andWhere('r.timestamp >= :since', { since })
       .orderBy('r.timestamp', 'ASC')
+      .take(2000)
       .getMany();
     
     // Obtener umbrales
