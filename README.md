@@ -165,18 +165,157 @@ Ver `docs/SECURITY.md` para politica completa y reporte de vulnerabilidades.
 
 ## Tests
 
+El proyecto usa **Jest** con `ts-jest` como transformador. Entorno: `node`. Configuracion en `package.json`.
+
+### Piramide de testing
+
+| Nivel | Herramienta | Responsable | Velocidad |
+|-------|-------------|-------------|-----------|
+| Unit tests | Jest | Servicios aislados con mocks | Rapido (~segundos) |
+| Integration tests | Jest + TypeORM | Repositorios + BD en memoria/SQL | Medio (~minutos) |
+| E2E tests | Jest + Supertest | Controllers + endpoints HTTP | Lento (~minutos) |
+
+### Escribir tests unitarios
+
+Los tests se ubican junto al codigo (`*.spec.ts`). Estrategia para servicios NestJS:
+
+**1. Mock de repositorios TypeORM:**
+
+```typescript
+// sensor-metrics.service.spec.ts
+import { Test, TestingModule } from '@nestjs/testing';
+import { getRepositoryToken } from '@nestjs/typeorm';
+import { SensorMetricsService } from './sensor-metrics.service';
+import { SensorReading } from '../entities/sensor-reading.entity';
+
+const mockRepo = {
+  find: jest.fn(),
+  findOne: jest.fn(),
+  createQueryBuilder: jest.fn().mockReturnValue({
+    where: jest.fn().mockReturnThis(),
+    orderBy: jest.fn().mockReturnThis(),
+    take: jest.fn().mockReturnThis(),
+    getMany: jest.fn(),
+  }),
+};
+
+describe('SensorMetricsService', () => {
+  let service: SensorMetricsService;
+
+  beforeEach(async () => {
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        SensorMetricsService,
+        { provide: getRepositoryToken(SensorReading), useValue: mockRepo },
+      ],
+    }).compile();
+
+    service = module.get<SensorMetricsService>(SensorMetricsService);
+    jest.clearAllMocks();
+  });
+
+  it('debe retornar lecturas crudas ordenadas por timestamp', async () => {
+    mockRepo.createQueryBuilder().getMany.mockResolvedValue([
+      { id: '1', sensorId: '123', value: 25.5, timestamp: new Date() },
+    ]);
+
+    const result = await service.getRawSensorReadings(123, 100);
+    expect(result).toHaveLength(1);
+    expect(result[0].value).toBe(25.5);
+  });
+});
+```
+
+**2. Mock de servicios delegados (fachadas SOLID):**
+
+```typescript
+// crm.service.spec.ts
+import { CrmService } from './crm.service';
+import { CrmDashboardService } from './crm-dashboard.service';
+
+describe('CrmService', () => {
+  let service: CrmService;
+  const mockDashboard = { getDashboard: jest.fn() };
+
+  beforeEach(() => {
+    service = new CrmService(mockDashboard as any, {} as any, {} as any);
+  });
+
+  it('delega getDashboard a CrmDashboardService', async () => {
+    mockDashboard.getDashboard.mockResolvedValue({ total: 5 });
+    const result = await service.getDashboard({}, { userId: '1' });
+    expect(mockDashboard.getDashboard).toHaveBeenCalled();
+    expect(result.total).toBe(5);
+  });
+});
+```
+
+### Escribir tests de integracion
+
+Para tests que necesitan BD real (SQL Server dockerizado):
+
 ```bash
-# Unit tests
+# Levantar SQL Server para tests
+docker run -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=YourPassword123!' \
+  -p 1434:1433 --name sql-test -d mcr.microsoft.com/mssql/server:2022-latest
+
+# Ejecutar schema en BD de test
+sqlcmd -S localhost,1434 -U sa -P 'YourPassword123!' -i iot_schema.sql
+
+# Ejecutar tests de integracion
+npm run test -- --testPathPattern='integration'
+```
+
+### Comandos de testing
+
+```bash
+# Unit tests (watch mode en desarrollo)
 npm run test
+
+# Unit tests una sola vez (CI)
+npm run test -- --watchAll=false --coverage
+
+# Tests de un archivo especifico
+npm run test -- sensor-metrics.service.spec.ts
+
+# Tests con pattern
+npm run test -- --testNamePattern="debe retornar"
 
 # E2E tests
 npm run test:e2e
 
-# Cobertura
+# Cobertura detallada
 npm run test:cov
 
-# Verificacion de tipos
+# Cobertura con umbral minimo (CI)
+npm run test -- --coverage --coverageThreshold='{"global":{"branches":70,"functions":70,"lines":70,"statements":70}}'
+
+# Verificacion estatica de tipos
 npx tsc --noEmit
+```
+
+### Buenas practicas
+
+- **Arrange-Act-Assert**: cada test debe tener 3 secciones claras.
+- **Un assert por test**: un test verifica un comportamiento.
+- **Mocks explicitos**: usar `jest.clearAllMocks()` en `beforeEach`.
+- **Datos de fixture**: centralizar datos de prueba en `__fixtures__/`, no hardcodear.
+- **Sin dependencias reales**: nunca llamar a FCM, SMTP o Redis en unit tests.
+- **Tests para DTOs**: validar que `class-validator` rechace datos invalidos.
+- **Tests para guards**: verificar que roles incorrectos retornen 403.
+
+### Tests existentes
+
+Los tests actuales se encuentran en:
+
+- `src/auth/__tests__/auth.controller.spec.ts` — tests de login/logout
+- `src/provisioning/__tests__/soft-delete.spec.ts` — tests de soft delete
+- `src/events/__tests__/scaling.spec.ts` — tests de event bus y DLQ
+
+Para ver la lista completa:
+
+```bash
+find src -name "*.spec.ts" | sort
 ```
 
 ## Scripts utiles
