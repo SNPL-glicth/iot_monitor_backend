@@ -35,7 +35,7 @@ export class CreateSensorThresholdDto {
   name!: string;
 
   @IsIn(['greater_than', 'less_than', 'equal_to', 'out_of_range'])
-  conditionType!: string;
+  conditionType!: 'greater_than' | 'less_than' | 'equal_to' | 'out_of_range';
 
   @IsOptional()
   @IsNumber()
@@ -48,7 +48,7 @@ export class CreateSensorThresholdDto {
   thresholdValueMax?: number;
 
   @IsIn(['warning', 'critical', 'info'])
-  severity!: string;
+  severity!: 'warning' | 'critical' | 'info';
 }
 
 export class UpdateThresholdDto {
@@ -64,7 +64,7 @@ export class UpdateThresholdDto {
 
   @IsOptional()
   @IsIn(['warning', 'critical', 'info'])
-  severity?: string;
+  severity?: 'warning' | 'critical' | 'info';
 
   @IsOptional()
   @IsString()

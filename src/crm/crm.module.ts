@@ -15,6 +15,9 @@ import {
 } from '../entities/views';
 import { CrmController } from './crm.controller';
 import { CrmService } from './crm.service';
+import { CrmDashboardService } from './crm-dashboard.service';
+import { CrmAlertService } from './crm-alert.service';
+import { CrmDeviceService } from './crm-device.service';
 
 @Module({
   imports: [
@@ -33,6 +36,7 @@ import { CrmService } from './crm.service';
     ]),
   ],
   controllers: [CrmController],
-  providers: [CrmService],
+  providers: [CrmService, CrmDashboardService, CrmAlertService, CrmDeviceService],
+  exports: [CrmService],
 })
 export class CrmModule {}

@@ -3,6 +3,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 
 import { IntelligenceController } from './intelligence.controller';
 import { IntelligenceService } from './intelligence.service';
+import { IntelligencePredictionService } from './intelligence-prediction.service';
+import { IntelligenceDecisionService } from './intelligence-decision.service';
 import { MlPipelineService } from './ml-pipeline.service';
 import { Prediction } from '../entities/prediction.entity';
 import { MlEvent } from '../entities/ml-event.entity';
@@ -25,7 +27,7 @@ import { AlertThreshold } from '../entities/alert-threshold.entity';
     ]),
   ],
   controllers: [IntelligenceController],
-  providers: [IntelligenceService, MlPipelineService],
+  providers: [IntelligenceService, IntelligencePredictionService, IntelligenceDecisionService, MlPipelineService],
   exports: [IntelligenceService, MlPipelineService],
 })
 export class IntelligenceModule {}

@@ -18,6 +18,11 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Extracted `AlertMaintenanceService` from `MonitoringService` (SRP) — handles TTL cleanup and auto-resolve stored procedures.
 - Extracted `DevToolsService` from `MonitoringService` (SRP) — handles destructive dev/testing operations.
 - `MonitoringController` now injects and delegates to the three new services.
+- Extracted `CrmDashboardService`, `CrmAlertService`, `CrmDeviceService` from `CrmService` (SRP).
+- `CrmService` converted to facade delegating to CRM sub-services.
+- Extracted `DeviceProvisioningService` and `SensorProvisioningService` from `ProvisioningService` (SRP).
+- Extracted `IntelligencePredictionService` and `IntelligenceDecisionService` from `IntelligenceService` (SRP).
+- `CrmBaseService` created with shared utilities (cache, deadlock retry, helpers) to avoid duplication.
 
 ### Documentation
 - Added `docs/ARCHITECTURE.md` with module diagram and design decisions.
