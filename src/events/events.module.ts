@@ -11,6 +11,9 @@
 
 import { Module, OnModuleInit, Logger, Inject } from '@nestjs/common';
 import { RedisEventBus } from './redis-event-bus';
+import { EventPublisherService } from './event-publisher.service';
+import { EventConsumerService } from './event-consumer.service';
+import { DlqManagerService } from './dlq-manager.service';
 import { AnomalyEventHandler } from './anomaly-event.handler';
 import { NotificationEventHandler } from './notification-event.handler';
 import { IdempotencyService } from './idempotency.service';
@@ -35,6 +38,9 @@ import { AuthModule } from '../auth/auth.module';
     RealtimeGateway,
     AnomalyEventHandler,
     NotificationEventHandler,
+    EventPublisherService,
+    EventConsumerService,
+    DlqManagerService,
     {
       provide: DLQRetryWorker,
       useFactory: (eventBus: RedisEventBus, idempotencyService: IdempotencyService) => {
@@ -43,7 +49,7 @@ import { AuthModule } from '../auth/auth.module';
       inject: ['REDIS_EVENT_BUS', IdempotencyService],
     },
   ],
-  exports: ['REDIS_EVENT_BUS', AnomalyEventHandler, NotificationEventHandler, IdempotencyService],
+  exports: ['REDIS_EVENT_BUS', AnomalyEventHandler, NotificationEventHandler, IdempotencyService, EventPublisherService, EventConsumerService, DlqManagerService],
 })
 export class EventsModule implements OnModuleInit {
   private readonly logger = new Logger(EventsModule.name);

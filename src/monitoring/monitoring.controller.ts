@@ -20,6 +20,9 @@ import { MonitoringService } from './monitoring.service';
 import { SensorMetricsService } from './sensor-metrics.service';
 import { AlertMaintenanceService } from './alert-maintenance.service';
 import { DevToolsService } from './dev-tools.service';
+import { SensorThresholdService } from './sensor-threshold.service';
+import { SensorQueryService } from './sensor-query.service';
+import { SensorDiagnosticService } from './sensor-diagnostic.service';
 import { StateComputationService } from '../domain/state-computation.service';
 import {
   UpdateThresholdProfileDto,
@@ -37,6 +40,9 @@ export class MonitoringController {
     private readonly sensorMetricsService: SensorMetricsService,
     private readonly alertMaintenanceService: AlertMaintenanceService,
     private readonly devToolsService: DevToolsService,
+    private readonly sensorThresholdService: SensorThresholdService,
+    private readonly sensorQueryService: SensorQueryService,
+    private readonly sensorDiagnosticService: SensorDiagnosticService,
     private readonly stateComputationService: StateComputationService,
   ) {}
 
@@ -48,7 +54,7 @@ export class MonitoringController {
   @Get('devices')
   @Roles('admin', 'operator', 'viewer')
   getDevicesWithSensors() {
-    return this.monitoringService.getDevicesWithSensors();
+    return this.sensorQueryService.getDevicesWithSensors();
   }
 
   /**
@@ -58,7 +64,7 @@ export class MonitoringController {
   @Get('devices/:id')
   @Roles('admin', 'operator', 'viewer')
   getDeviceById(@Param('id', ParseIntPipe) id: number) {
-    return this.monitoringService.getDeviceById(id);
+    return this.sensorQueryService.getDeviceById(id);
   }
 
   /**
@@ -68,7 +74,7 @@ export class MonitoringController {
   @Get('readings/latest')
   @Roles('admin', 'operator', 'viewer')
   getLatestSensorReadings() {
-    return this.monitoringService.getLatestSensorReadings();
+    return this.sensorQueryService.getLatestSensorReadings();
   }
 
   /**
@@ -78,7 +84,7 @@ export class MonitoringController {
   @Roles('admin', 'operator', 'viewer')
   getActiveAlerts(@Query('limit') limit = '100') {
     const parsedLimit = Number(limit) || 100;
-    return this.monitoringService.getActiveAlerts(parsedLimit);
+    return this.sensorQueryService.getActiveAlerts(parsedLimit);
   }
 
   /**
@@ -92,13 +98,13 @@ export class MonitoringController {
     @Query('limit') limit = '100',
   ) {
     const parsedLimit = Number(limit) || 100;
-    return this.monitoringService.getSensorReadings(sensorId, parsedLimit);
+    return this.sensorQueryService.getSensorReadings(sensorId, parsedLimit);
   }
 
   @Get('sensors/:sensorId/status')
   @Roles('admin', 'operator', 'viewer')
   getSensorConsolidatedStatus(@Param('sensorId', ParseIntPipe) sensorId: number) {
-    return this.monitoringService.getSensorConsolidatedStatus(sensorId);
+    return this.sensorQueryService.getSensorConsolidatedStatus(sensorId);
   }
 
   /**
@@ -112,7 +118,7 @@ export class MonitoringController {
     @Query('limit') limit = '50',
   ) {
     const parsedLimit = Number(limit) || 50;
-    return this.monitoringService.getSensorAlertsHistory(sensorId, parsedLimit);
+    return this.sensorQueryService.getSensorAlertsHistory(sensorId, parsedLimit);
   }
 
   /**
@@ -122,7 +128,7 @@ export class MonitoringController {
   @Get('sensors/:sensorId/thresholds')
   @Roles('admin', 'operator', 'viewer')
   getSensorThresholds(@Param('sensorId', ParseIntPipe) sensorId: number) {
-    return this.monitoringService.getSensorThresholds(sensorId);
+    return this.sensorThresholdService.getSensorThresholds(sensorId);
   }
 
   /**
@@ -132,7 +138,7 @@ export class MonitoringController {
   @Get('sensors/:sensorId/threshold-profile')
   @Roles('admin', 'operator', 'viewer')
   getSensorThresholdProfile(@Param('sensorId', ParseIntPipe) sensorId: number) {
-    return this.monitoringService.getSensorThresholdProfile(sensorId);
+    return this.sensorThresholdService.getSensorThresholdProfile(sensorId);
   }
 
   /**
@@ -144,7 +150,7 @@ export class MonitoringController {
     @Param('sensorId', ParseIntPipe) sensorId: number,
     @Body() body: UpdateThresholdProfileDto,
   ) {
-    return this.monitoringService.upsertSensorThresholdProfile(sensorId, {
+    return this.sensorThresholdService.upsertSensorThresholdProfile(sensorId, {
       warningMin: body.warningMin ?? null,
       warningMax: body.warningMax ?? null,
       alertMin: body.alertMin ?? null,
@@ -163,7 +169,7 @@ export class MonitoringController {
     @Param('sensorId', ParseIntPipe) sensorId: number,
     @Body() body: CreateSensorThresholdDto,
   ) {
-    return this.monitoringService.createSensorThreshold(sensorId, {
+    return this.sensorThresholdService.createSensorThreshold(sensorId, {
       name: body.name,
       conditionType: body.conditionType,
       thresholdValueMin: body.thresholdValueMin ?? null,
@@ -184,7 +190,7 @@ export class MonitoringController {
     @Req() req: any,
   ) {
     const userId = String(req?.user?.userId ?? '');
-    return this.monitoringService.updateThreshold(thresholdId, userId, {
+    return this.sensorThresholdService.updateThreshold(thresholdId, userId, {
       thresholdValueMin: body.thresholdValueMin,
       thresholdValueMax: body.thresholdValueMax,
       severity: body.severity,
@@ -205,7 +211,7 @@ export class MonitoringController {
     @Req() req: any,
   ) {
     const userId = String(req?.user?.userId ?? '');
-    return this.monitoringService.deactivateThreshold(thresholdId, userId, reason ?? null);
+    return this.sensorThresholdService.deactivateThreshold(thresholdId, userId, reason ?? null);
   }
 
   /**
@@ -215,7 +221,7 @@ export class MonitoringController {
   @Get('thresholds/:thresholdId/history')
   @Roles('admin', 'operator', 'viewer')
   getThresholdHistory(@Param('thresholdId', ParseIntPipe) thresholdId: number) {
-    return this.monitoringService.getThresholdHistory(thresholdId);
+    return this.sensorThresholdService.getThresholdHistory(thresholdId);
   }
 
 
@@ -227,7 +233,7 @@ export class MonitoringController {
   @Roles('admin', 'operator', 'viewer')
   getLatestPredictions(@Query('limit') limit = '50') {
     const parsedLimit = Number(limit) || 50;
-    return this.monitoringService.getLatestPredictions(parsedLimit);
+    return this.sensorQueryService.getLatestPredictions(parsedLimit);
   }
 
   /**
@@ -238,7 +244,7 @@ export class MonitoringController {
   @Roles('admin', 'operator', 'viewer')
   getActiveMlEvents(@Query('limit') limit = '50') {
     const parsedLimit = Number(limit) || 50;
-    return this.monitoringService.getActiveMlEvents(parsedLimit);
+    return this.sensorQueryService.getActiveMlEvents(parsedLimit);
   }
 
   /**
@@ -252,14 +258,14 @@ export class MonitoringController {
     @Param('sensorId', ParseIntPipe) sensorId: number,
     @Body('value') value: number,
   ) {
-    await this.monitoringService.insertSensorReading(sensorId, Number(value));
+    await this.sensorQueryService.insertSensorReading(sensorId, Number(value));
     return { success: true };
   }
 
   @Get('debug/db')
   @Roles('admin', 'operator', 'viewer')
   getDbDebug(@Query('sensorId') sensorId?: string) {
-    return this.monitoringService.getDbDebug(sensorId);
+    return this.sensorDiagnosticService.getDbDebug(sensorId);
   }
 
   /**
@@ -269,7 +275,7 @@ export class MonitoringController {
   @Get('ml-health')
   @Roles('admin', 'operator', 'viewer')
   getMlHealth() {
-    return this.monitoringService.getMlHealth();
+    return this.sensorQueryService.getMlHealth();
   }
 
   /**
@@ -280,7 +286,7 @@ export class MonitoringController {
   @Roles('admin')
   @HttpCode(HttpStatus.OK)
   async deleteSensor(@Param('sensorId', ParseIntPipe) sensorId: number) {
-    return this.monitoringService.deleteSensor(sensorId);
+    return this.sensorQueryService.deleteSensor(sensorId);
   }
 
   /**
@@ -291,7 +297,7 @@ export class MonitoringController {
   @Get('debug/sensors/:sensorId')
   @Roles('admin')
   async debugSensor(@Param('sensorId', ParseIntPipe) sensorId: number) {
-    return this.monitoringService.debugSensor(sensorId);
+    return this.sensorDiagnosticService.debugSensor(sensorId);
   }
 
   /**
@@ -387,7 +393,7 @@ export class MonitoringController {
   async debugTelemetryFlow(
     @Query('sensorId') sensorId?: string,
   ) {
-    return this.monitoringService.debugTelemetryFlow(sensorId ? Number(sensorId) : undefined);
+    return this.sensorDiagnosticService.debugTelemetryFlow(sensorId ? Number(sensorId) : undefined);
   }
 
   /**
@@ -402,7 +408,7 @@ export class MonitoringController {
     @Query('sensorId', ParseIntPipe) sensorId: number,
     @Query('range') range = '1h',
   ) {
-    return this.monitoringService.debugChartData(sensorId, range);
+    return this.sensorDiagnosticService.debugChartData(sensorId, range);
   }
 
   // ============================================================================
@@ -462,7 +468,7 @@ export class MonitoringController {
   @Get('sensors/:sensorId/state')
   @Roles('admin', 'operator', 'viewer')
   async getSensorState(@Param('sensorId', ParseIntPipe) sensorId: number) {
-    const sensorData = await this.monitoringService.getSensorConsolidatedStatus(
+    const sensorData = await this.sensorQueryService.getSensorConsolidatedStatus(
       sensorId,
     );
 

@@ -6,6 +6,9 @@ import { MonitoringService } from './monitoring.service';
 import { SensorMetricsService } from './sensor-metrics.service';
 import { AlertMaintenanceService } from './alert-maintenance.service';
 import { DevToolsService } from './dev-tools.service';
+import { SensorThresholdService } from './sensor-threshold.service';
+import { SensorQueryService } from './sensor-query.service';
+import { SensorDiagnosticService } from './sensor-diagnostic.service';
 import { SensorStatusController } from './sensor-status.controller';
 import { RateLimitGuard } from '../common/rate-limit.guard';
 import { Device } from '../entities/device.entity';
@@ -54,9 +57,12 @@ import { StateComputationService } from '../domain/state-computation.service';
     SensorMetricsService,
     AlertMaintenanceService,
     DevToolsService,
+    SensorThresholdService,
+    SensorQueryService,
+    SensorDiagnosticService,
     RateLimitGuard,
     StateComputationService,
   ],
-  exports: [MonitoringService, StateComputationService, SensorMetricsService],
+  exports: [MonitoringService, StateComputationService, SensorMetricsService, SensorThresholdService, SensorQueryService, SensorDiagnosticService],
 })
 export class MonitoringModule {}

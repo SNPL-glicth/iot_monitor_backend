@@ -23,6 +23,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Extracted `DeviceProvisioningService` and `SensorProvisioningService` from `ProvisioningService` (SRP).
 - Extracted `IntelligencePredictionService` and `IntelligenceDecisionService` from `IntelligenceService` (SRP).
 - `CrmBaseService` created with shared utilities (cache, deadlock retry, helpers) to avoid duplication.
+- Extracted `SensorThresholdService`, `SensorQueryService`, `SensorDiagnosticService` from `MonitoringService` (SRP).
+- Extracted `NotificationPushService` and `NotificationQueryService` from `NotificationsService` (SRP).
+- Extracted `EventPublisherService`, `EventConsumerService`, `DlqManagerService` from `RedisEventBus` (SRP).
+- Extracted `MlPipelineTrainingService`, `MlPipelineInferenceService`, `MlPipelineDiagnosticsService` from `MlPipelineService` (SRP).
+- Extracted `AuthTokenService` and `AuthUserService` from `AuthService` (SRP).
+- Extracted `MqttPublisherService` and `MqttSubscriptionService` from `MqttService` (SRP).
 
 ### Documentation
 - Added `docs/ARCHITECTURE.md` with module diagram and design decisions.

@@ -4,6 +4,8 @@ import { JwtModule } from '@nestjs/jwt';
 import { User } from '../entities/user.entity';
 import { RefreshToken } from '../entities/refresh-token.entity';
 import { AuthService } from './auth.service';
+import { AuthTokenService } from './auth-token.service';
+import { AuthUserService } from './auth-user.service';
 import { AuthController } from './auth.controller';
 import { JwtStrategy } from './jwt.strategy';
 import { durationToMs } from './auth.utils';
@@ -28,7 +30,7 @@ import { getJwtSecret } from './jwt-secret';
     }),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
-  exports: [AuthService, JwtModule],
+  providers: [AuthService, AuthTokenService, AuthUserService, JwtStrategy],
+  exports: [AuthService, AuthTokenService, AuthUserService, JwtModule],
 })
 export class AuthModule {}

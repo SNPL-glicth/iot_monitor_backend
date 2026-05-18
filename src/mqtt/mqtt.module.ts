@@ -14,11 +14,13 @@
 
 import { Module, Global } from '@nestjs/common';
 import { MqttService } from './mqtt.service';
+import { MqttPublisherService } from './mqtt-publisher.service';
+import { MqttSubscriptionService } from './mqtt-subscription.service';
 import { AlertPublisher } from './alert.publisher';
 
 @Global()
 @Module({
-  providers: [MqttService, AlertPublisher],
-  exports: [MqttService, AlertPublisher],
+  providers: [MqttService, MqttPublisherService, MqttSubscriptionService, AlertPublisher],
+  exports: [MqttService, MqttPublisherService, MqttSubscriptionService, AlertPublisher],
 })
 export class MqttModule {}

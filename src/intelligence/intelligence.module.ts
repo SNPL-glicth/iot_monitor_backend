@@ -6,6 +6,9 @@ import { IntelligenceService } from './intelligence.service';
 import { IntelligencePredictionService } from './intelligence-prediction.service';
 import { IntelligenceDecisionService } from './intelligence-decision.service';
 import { MlPipelineService } from './ml-pipeline.service';
+import { MlPipelineTrainingService } from './ml-pipeline-training.service';
+import { MlPipelineInferenceService } from './ml-pipeline-inference.service';
+import { MlPipelineDiagnosticsService } from './ml-pipeline-diagnostics.service';
 import { Prediction } from '../entities/prediction.entity';
 import { MlEvent } from '../entities/ml-event.entity';
 import { MlEventActiveView } from '../entities/views';
@@ -27,7 +30,7 @@ import { AlertThreshold } from '../entities/alert-threshold.entity';
     ]),
   ],
   controllers: [IntelligenceController],
-  providers: [IntelligenceService, IntelligencePredictionService, IntelligenceDecisionService, MlPipelineService],
-  exports: [IntelligenceService, MlPipelineService],
+  providers: [IntelligenceService, IntelligencePredictionService, IntelligenceDecisionService, MlPipelineService, MlPipelineTrainingService, MlPipelineInferenceService, MlPipelineDiagnosticsService],
+  exports: [IntelligenceService, MlPipelineService, MlPipelineTrainingService, MlPipelineInferenceService, MlPipelineDiagnosticsService],
 })
 export class IntelligenceModule {}

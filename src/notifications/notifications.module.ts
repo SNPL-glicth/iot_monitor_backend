@@ -3,6 +3,8 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { HttpModule } from '@nestjs/axios';
 
 import { NotificationsService } from './notifications.service';
+import { NotificationPushService } from './notification-push.service';
+import { NotificationQueryService } from './notification-query.service';
 import { NotificationsController } from './notifications.controller';
 import { UserDevice } from '../entities/user-device.entity';
 import { Device } from '../entities/device.entity';
@@ -40,7 +42,7 @@ class PushToken {
     TypeOrmModule.forFeature([PushToken, UserDevice, Device, Alert, User, AlertNotification, Sensor]),
   ],
   controllers: [NotificationsController],
-  providers: [NotificationsService],
-  exports: [NotificationsService],
+  providers: [NotificationsService, NotificationPushService, NotificationQueryService],
+  exports: [NotificationsService, NotificationPushService, NotificationQueryService],
 })
 export class NotificationsModule {}
