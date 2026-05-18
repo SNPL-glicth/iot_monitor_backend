@@ -3,6 +3,9 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { HttpModule } from '@nestjs/axios';
 import { MonitoringController } from './monitoring.controller';
 import { MonitoringService } from './monitoring.service';
+import { SensorMetricsService } from './sensor-metrics.service';
+import { AlertMaintenanceService } from './alert-maintenance.service';
+import { DevToolsService } from './dev-tools.service';
 import { SensorStatusController } from './sensor-status.controller';
 import { RateLimitGuard } from '../common/rate-limit.guard';
 import { Device } from '../entities/device.entity';
@@ -22,6 +25,7 @@ import {
   MlEventActiveView,
   SensorConsolidatedStatusView,
 } from '../entities/views';
+import { StateComputationService } from '../domain/state-computation.service';
 
 @Module({
   imports: [
@@ -45,7 +49,14 @@ import {
     ]),
   ],
   controllers: [MonitoringController, SensorStatusController],
-  providers: [MonitoringService, RateLimitGuard],
-  exports: [MonitoringService],
+  providers: [
+    MonitoringService,
+    SensorMetricsService,
+    AlertMaintenanceService,
+    DevToolsService,
+    RateLimitGuard,
+    StateComputationService,
+  ],
+  exports: [MonitoringService, StateComputationService, SensorMetricsService],
 })
 export class MonitoringModule {}

@@ -31,7 +31,7 @@ export class AdminUsersController {
 
   @Get(':id')
   findOne(@Param('id', ParseIntPipe) id: number) {
-    return this.adminUsersService.findOne(id);
+    return this.adminUsersService.findOne(id.toString());
   }
 
   @Post()
@@ -44,11 +44,11 @@ export class AdminUsersController {
     @Param('id', ParseIntPipe) id: number,
     @Body() dto: UpdateUserDto,
   ) {
-    return this.adminUsersService.update(id, dto);
+    return this.adminUsersService.update(id.toString(), dto);
   }
 
   @Delete(':id')
   remove(@Param('id', ParseIntPipe) id: number) {
-    return this.adminUsersService.remove(id);
+    return this.adminUsersService.remove(id.toString());
   }
 }

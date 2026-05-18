@@ -12,6 +12,7 @@ import {
 } from '../common/sensor-states';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, In, Repository } from 'typeorm';
+import { withTransaction } from '../common/utils/transaction.utils';
 
 /**
  * FIX DEADLOCK: Detecta si el error es un deadlock de SQL Server (error 1205)
@@ -1253,47 +1254,52 @@ export class MonitoringService {
    * ✅ Permitir eliminar si sensor está inactivo (isActive: false)
    * ✅ Permitir eliminar si dispositivo está offline
    * ❌ Bloquear si sensor está online/offline activo Y dispositivo online
+   * 
+   * CRITICAL: Uses transaction to prevent race conditions
    */
   async deleteSensor(sensorId: number) {
-    const sensor = await this.sensorRepo.findOne({
-      where: { id: String(sensorId) },
-      relations: ['device'],
+    return withTransaction(this.dataSource, async (manager) => {
+      // Lock sensor row to prevent concurrent modifications
+      const sensor = await manager.findOne(Sensor, {
+        where: { id: String(sensorId) },
+        relations: ['device'],
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (!sensor) {
+        throw new NotFoundException('Sensor no encontrado');
+      }
+
+      const sensorStatus = (sensor.status || '').toLowerCase();
+      const deviceStatus = (sensor.device?.status || '').toLowerCase();
+      const deletableStates = ['draft', 'pending_claim', 'pending_confirmation', 'revoked'];
+
+      // Permitir eliminar si:
+      // 1. Status del sensor está en estados eliminables
+      // 2. Sensor está inactivo
+      // 3. Dispositivo está offline
+      const canDelete = 
+        deletableStates.includes(sensorStatus) ||
+        !sensor.isActive ||
+        deviceStatus !== 'online';
+
+      if (!canDelete) {
+        throw new BadRequestException(
+          `No se puede eliminar un sensor en estado "${sensor.status}" mientras el dispositivo está online. ` +
+          'Desactive el sensor primero o espere a que el dispositivo esté offline.',
+        );
+      }
+
+      // Soft delete (atomic within transaction)
+      sensor.isActive = false;
+      sensor.status = 'revoked';
+      sensor.updatedAt = new Date();
+      await manager.save(sensor);
+
+      return {
+        message: `Sensor ${sensor.name || sensorId} eliminado correctamente.`,
+      };
     });
-
-    if (!sensor) {
-      throw new NotFoundException('Sensor no encontrado');
-    }
-
-    const sensorStatus = (sensor.status || '').toLowerCase();
-    const deviceStatus = (sensor.device?.status || '').toLowerCase();
-    const deletableStates = ['draft', 'pending_claim', 'pending_confirmation', 'revoked'];
-
-    // Permitir eliminar si:
-    // 1. Status del sensor está en estados eliminables
-    // 2. Sensor está inactivo
-    // 3. Dispositivo está offline
-    const canDelete = 
-      deletableStates.includes(sensorStatus) ||
-      !sensor.isActive ||
-      deviceStatus !== 'online';
-
-    if (!canDelete) {
-      throw new BadRequestException(
-        `No se puede eliminar un sensor en estado "${sensor.status}" mientras el dispositivo está online. ` +
-        'Desactive el sensor primero o espere a que el dispositivo esté offline.',
-      );
-    }
-
-    // Soft delete
-    await this.sensorRepo.update(String(sensorId), {
-      isActive: false,
-      status: 'revoked',
-      updatedAt: new Date(),
-    });
-
-    return {
-      message: `Sensor ${sensor.name || sensorId} eliminado correctamente.`,
-    };
   }
 
   /**

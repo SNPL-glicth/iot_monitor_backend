@@ -3,10 +3,11 @@ import { UserDevice } from './user-device.entity';
 import { Alert } from './alert.entity';
 import { Command } from './command.entity';
 import { AuditLog } from './audit-log.entity';
+import { bigIntTransformer } from '../common/transformers/bigint.transformer';
 
 @Entity({ name: 'users' })
 export class User {
-  @PrimaryGeneratedColumn('increment', { type: 'bigint' })
+  @PrimaryGeneratedColumn('increment')
   id!: string;
 
   @Column({ type: 'varchar', length: 100, unique: true })

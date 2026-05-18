@@ -40,6 +40,8 @@ import { ProvisioningModule } from './provisioning/provisioning.module';
 import { AlertEventsModule } from './alerts/alert-events.module';
 import { AlertEvent } from './entities/alert-event.entity';
 import { MqttModule } from './mqtt/mqtt.module';
+import { BigIntSubscriber } from './common/subscribers/bigint.subscriber';
+import { EventsModule } from './events/events.module';
 
 @Module({
   imports: [
@@ -57,6 +59,7 @@ import { MqttModule } from './mqtt/mqtt.module';
       extra: {
         trustServerCertificate: true,
       },
+      subscribers: [BigIntSubscriber],
       entities: [
         Device,
         Sensor,
@@ -97,6 +100,7 @@ import { MqttModule } from './mqtt/mqtt.module';
     ProvisioningModule,
     AlertEventsModule,
     MqttModule,
+    EventsModule,
   ],
   controllers: [AppController],
   providers: [AppService],

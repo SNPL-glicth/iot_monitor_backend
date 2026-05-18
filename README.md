@@ -193,11 +193,22 @@ Backend NestJS para un sistema de **IoT Monitoring / IoT System** conectado a SQ
 
 2. Verificar que las tablas existen (el script ya incluye consultas como `SELECT name FROM sys.tables`).
 
+## Documentación técnica
+
+- [Arquitectura](docs/ARCHITECTURE.md) — diagrama de módulos, decisiones técnicas, flujo de datos.
+- [Contribuir](docs/CONTRIBUTING.md) — estándares de código, convenciones de commits, checklist PR.
+- [Seguridad](docs/SECURITY.md) — política de reporte de vulnerabilidades, medidas de seguridad implementadas.
+- [Changelog](docs/CHANGELOG.md) — historial de cambios notables.
+
 ## Variables de entorno (`.env`)
 
-En la raíz del backend (`iot_monitor_backend`) crea un archivo `.env` con al menos.
+En la raíz del backend (`iot_monitor_backend`) crea un archivo `.env` copiando `.env.example`:
 
-Nota: se incluye un ejemplo en `iot_monitor_backend/.env.example` (no subas `.env` con credenciales reales).
+```bash
+cp .env.example .env
+```
+
+**NUNCA subas `.env` con credenciales reales al repositorio.**
 
 ```bash
 DB_DIALECT=mssql

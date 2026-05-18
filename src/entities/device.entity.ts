@@ -1,4 +1,4 @@
-import { Column, Entity, Generated, OneToMany, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, DeleteDateColumn, Entity, Generated, OneToMany, PrimaryGeneratedColumn } from 'typeorm';
 import { Sensor } from './sensor.entity';
 import { UserDevice } from './user-device.entity';
 import { Alert } from './alert.entity';
@@ -37,6 +37,9 @@ export class Device {
 
   @Column({ name: 'updated_at', type: 'datetime2', nullable: true })
   updatedAt?: Date | null;
+
+  @DeleteDateColumn({ name: 'deleted_at', type: 'datetime2' })
+  deletedAt?: Date | null;
 
   // Rate limiting para activación
   @Column({ name: 'activation_attempts', type: 'int', default: 0 })

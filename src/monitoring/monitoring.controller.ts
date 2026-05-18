@@ -17,13 +17,28 @@ import { AuthGuard } from '@nestjs/passport';
 import { Roles } from '../auth/roles.decorator';
 import { RolesGuard } from '../auth/roles.guard';
 import { MonitoringService } from './monitoring.service';
+import { SensorMetricsService } from './sensor-metrics.service';
+import { AlertMaintenanceService } from './alert-maintenance.service';
+import { DevToolsService } from './dev-tools.service';
+import { StateComputationService } from '../domain/state-computation.service';
+import {
+  UpdateThresholdProfileDto,
+  CreateSensorThresholdDto,
+  UpdateThresholdDto,
+} from './monitoring.dto';
 
 // Endpoints de monitoreo (principalmente lectura)
 // Protegidos con JWT. Roles permitidos: admin/operator/viewer.
 @UseGuards(AuthGuard('jwt'), RolesGuard)
 @Controller('monitoring')
 export class MonitoringController {
-  constructor(private readonly monitoringService: MonitoringService) {}
+  constructor(
+    private readonly monitoringService: MonitoringService,
+    private readonly sensorMetricsService: SensorMetricsService,
+    private readonly alertMaintenanceService: AlertMaintenanceService,
+    private readonly devToolsService: DevToolsService,
+    private readonly stateComputationService: StateComputationService,
+  ) {}
 
   /**
     obtiene de 
@@ -127,14 +142,14 @@ export class MonitoringController {
   @Roles('admin')
   updateSensorThresholdProfile(
     @Param('sensorId', ParseIntPipe) sensorId: number,
-    @Body() body: any,
+    @Body() body: UpdateThresholdProfileDto,
   ) {
     return this.monitoringService.upsertSensorThresholdProfile(sensorId, {
-      warningMin: body?.warningMin ?? null,
-      warningMax: body?.warningMax ?? null,
-      alertMin: body?.alertMin ?? null,
-      alertMax: body?.alertMax ?? null,
-      cooldownSeconds: body?.cooldownSeconds,
+      warningMin: body.warningMin ?? null,
+      warningMax: body.warningMax ?? null,
+      alertMin: body.alertMin ?? null,
+      alertMax: body.alertMax ?? null,
+      cooldownSeconds: body.cooldownSeconds,
     });
   }
 
@@ -146,14 +161,14 @@ export class MonitoringController {
   @Roles('admin')
   createSensorThreshold(
     @Param('sensorId', ParseIntPipe) sensorId: number,
-    @Body() body: any,
+    @Body() body: CreateSensorThresholdDto,
   ) {
     return this.monitoringService.createSensorThreshold(sensorId, {
-      name: body?.name,
-      conditionType: body?.conditionType,
-      thresholdValueMin: body?.thresholdValueMin ?? null,
-      thresholdValueMax: body?.thresholdValueMax ?? null,
-      severity: body?.severity,
+      name: body.name,
+      conditionType: body.conditionType,
+      thresholdValueMin: body.thresholdValueMin ?? null,
+      thresholdValueMax: body.thresholdValueMax ?? null,
+      severity: body.severity,
     });
   }
 
@@ -165,16 +180,16 @@ export class MonitoringController {
   @Roles('admin')
   updateThreshold(
     @Param('thresholdId', ParseIntPipe) thresholdId: number,
-    @Body() body: any,
+    @Body() body: UpdateThresholdDto,
     @Req() req: any,
   ) {
     const userId = String(req?.user?.userId ?? '');
     return this.monitoringService.updateThreshold(thresholdId, userId, {
-      thresholdValueMin: body?.thresholdValueMin,
-      thresholdValueMax: body?.thresholdValueMax,
-      severity: body?.severity,
-      name: body?.name,
-      reason: body?.reason ?? null,
+      thresholdValueMin: body.thresholdValueMin,
+      thresholdValueMax: body.thresholdValueMax,
+      severity: body.severity,
+      name: body.name,
+      reason: body.reason ?? null,
     });
   }
 
@@ -268,12 +283,6 @@ export class MonitoringController {
     return this.monitoringService.deleteSensor(sensorId);
   }
 
-  @Get('debug/chart-data/:sensorId')
-  @Roles('admin')
-  debugChartData(@Param('sensorId', ParseIntPipe) sensorId: number) {
-    return this.monitoringService.debugChartData(sensorId);
-  }
-
   /**
    * Fix: Endpoint de debug para diagnosticar sensores bloqueados
    * Muestra por qué un sensor no es visible en las vistas
@@ -302,7 +311,7 @@ export class MonitoringController {
     @Query('since') since?: string,
   ) {
     const parsedLimit = Math.min(Math.max(1, Number(limit) || 500), 2000);
-    return this.monitoringService.getRawSensorReadings(sensorId, parsedLimit, since);
+    return this.sensorMetricsService.getRawSensorReadings(sensorId, parsedLimit, since);
   }
 
   /**
@@ -320,7 +329,7 @@ export class MonitoringController {
     @Param('sensorId', ParseIntPipe) sensorId: number,
     @Query('range') range = '6h',
   ) {
-    return this.monitoringService.getAggregatedSensorReadings(sensorId, range);
+    return this.sensorMetricsService.getAggregatedSensorReadings(sensorId, range);
   }
 
   /**
@@ -344,7 +353,7 @@ export class MonitoringController {
     @Query('limit') limit = '500',
   ) {
     const parsedLimit = Math.min(Math.max(1, Number(limit) || 500), 2000);
-    return this.monitoringService.getHistoricalReadings(sensorId, from, to, parsedLimit);
+    return this.sensorMetricsService.getHistoricalReadings(sensorId, from, to, parsedLimit);
   }
 
   /**
@@ -360,7 +369,7 @@ export class MonitoringController {
   @Roles('admin')
   @HttpCode(HttpStatus.OK)
   async runAlertMaintenance() {
-    return this.monitoringService.runAlertMaintenance();
+    return this.alertMaintenanceService.runAlertMaintenance();
   }
 
   /**
@@ -413,7 +422,7 @@ export class MonitoringController {
   @HttpCode(HttpStatus.OK)
   async deleteAllSensorReadings(@Req() req: any) {
     const userId = req.user?.id || req.user?.sub || 'unknown';
-    return this.monitoringService.deleteAllSensorReadings(userId);
+    return this.devToolsService.deleteAllSensorReadings(userId);
   }
 
   /**
@@ -432,6 +441,101 @@ export class MonitoringController {
     @Req() req: any,
   ) {
     const userId = req.user?.id || req.user?.sub || 'unknown';
-    return this.monitoringService.deleteSensorReadingsBySensor(sensorId, userId);
+    return this.devToolsService.deleteSensorReadingsBySensor(sensorId, userId);
+  }
+
+  /**
+   * GET /monitoring/sensors/:sensorId/state
+   *
+   * Retorna el estado precomputed de un sensor.
+   * Este es el endpoint que Telemetry debe usar para obtener el estado
+   * en lugar de computarlo localmente.
+   *
+   * Respuesta:
+   * - state: Estado operativo (NORMAL, WARNING, ALERT, PREDICTION, STALE, INITIALIZING)
+   * - severity: Severidad (critical, warning, info, unknown)
+   * - action_required: Si se requiere acción
+   * - action: Acción recomendada o null
+   * - currentValue: Valor actual del sensor
+   * - thresholds: Umbrales configurados
+   */
+  @Get('sensors/:sensorId/state')
+  @Roles('admin', 'operator', 'viewer')
+  async getSensorState(@Param('sensorId', ParseIntPipe) sensorId: number) {
+    const sensorData = await this.monitoringService.getSensorConsolidatedStatus(
+      sensorId,
+    );
+
+    if (!sensorData) {
+      return {
+        state: 'UNKNOWN',
+        severity: 'unknown',
+        action_required: false,
+        action: null,
+        currentValue: null,
+        thresholds: null,
+      };
+    }
+
+    const currentValue = sensorData.latestValue
+      ? Number(sensorData.latestValue)
+      : null;
+
+    // Extraer umbrales del array de thresholds
+    const warningThreshold = sensorData.thresholds?.find((t: any) => t.severity === 'warning');
+    const alertThreshold = sensorData.thresholds?.find((t: any) => t.severity === 'critical');
+
+    const thresholds = {
+      warningMin: warningThreshold?.thresholdValueMin
+        ? Number(warningThreshold.thresholdValueMin)
+        : null,
+      warningMax: warningThreshold?.thresholdValueMax
+        ? Number(warningThreshold.thresholdValueMax)
+        : null,
+      alertMin: alertThreshold?.thresholdValueMin ? Number(alertThreshold.thresholdValueMin) : null,
+      alertMax: alertThreshold?.thresholdValueMax ? Number(alertThreshold.thresholdValueMax) : null,
+    };
+
+    // Evaluar estado operacional usando StateComputationService
+    const operationalState =
+      this.stateComputationService.evaluateSensorOperationalState({
+        currentValue,
+        thresholds,
+        hasActiveAlerts: sensorData.activeAlertsCount > 0,
+        hasActiveWarnings: sensorData.warning_active !== null,
+        predictionWouldBreach: false, // No disponible en el tipo de retorno actual
+        operationalStateFromDb: sensorData.operational_state?.state,
+        isStale: sensorData.final_state === 'stale',
+      });
+
+    // Determinar severidad
+    let severity: 'critical' | 'warning' | 'info' | 'unknown' = 'info';
+    if (operationalState === 'ALERT' || operationalState === 'CRITICAL') {
+      severity = 'critical';
+    } else if (operationalState === 'WARNING') {
+      severity = 'warning';
+    } else if (operationalState === 'STALE' || operationalState === 'UNKNOWN') {
+      severity = 'unknown';
+    }
+
+    // Determinar si se requiere acción
+    const actionRequired =
+      this.stateComputationService.isActionRequired(operationalState, severity);
+
+    // Generar acción recomendada
+    const action = this.stateComputationService.recommendAction(
+      operationalState,
+      currentValue,
+      thresholds,
+    );
+
+    return {
+      state: operationalState,
+      severity,
+      action_required: actionRequired,
+      action,
+      currentValue,
+      thresholds,
+    };
   }
 }

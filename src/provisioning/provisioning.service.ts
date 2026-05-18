@@ -2,6 +2,7 @@ import { Injectable, BadRequestException, NotFoundException } from '@nestjs/comm
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource, IsNull } from 'typeorm';
 import * as crypto from 'crypto';
+import { withTransaction } from '../common/utils/transaction.utils';
 import { Device } from '../entities/device.entity';
 import { Sensor } from '../entities/sensor.entity';
 import { DeviceApiKey } from '../entities/device-api-key.entity';
@@ -77,6 +78,21 @@ export class ProvisioningService {
       [sensorId, thresholds.warningMin ?? null, thresholds.warningMax ?? null, 
        thresholds.alertMin ?? null, thresholds.alertMax ?? null],
     );
+  }
+
+  /**
+   * Crea entidad Sensor para definición (SOLID-SRP: separa construcción de lógica de transacción)
+   * BUG-1 FIX: Pasa { id: device.id } en lugar del objeto Device completo para evitar error de bigint
+   */
+  private createSensorEntity(device: Device, dto: DefineSensorDto): Sensor {
+    return {
+      device: { id: device.id },
+      sensorType: dto.sensorType,
+      name: `${dto.sensorType}_pending`,
+      unit: dto.unit,
+      status: 'draft',
+      isActive: false,
+    } as Sensor;
   }
 
   /**
@@ -366,7 +382,7 @@ export class ProvisioningService {
       return {
         deviceUuid: device.deviceUuid,
         deviceApiKey: newApiKey,
-        ingestUrl: process.env.INGEST_URL || 'http://localhost:8000/ingest/packets',
+        ingestUrl: process.env.INGEST_URL || 'http://localhost:8001/ingest/packets',
         sensors: (device.sensors || []).map(s => ({
           sensorUuid: s.sensorUuid,
           sensorType: s.sensorType,
@@ -467,15 +483,8 @@ export class ProvisioningService {
 
     try {
       // 1. Crear definición del sensor en estado DRAFT
-      const sensor = queryRunner.manager.create(Sensor, {
-        device: device,
-        sensorType: dto.sensorType,
-        name: `${dto.sensorType}_pending`, // Nombre temporal hasta activación
-        unit: dto.unit,
-        status: 'draft',
-        isActive: false, // NO activo hasta activación
-      });
-
+      const sensor = this.createSensorEntity(device, dto);
+      
       const savedSensor = await queryRunner.manager.save(Sensor, sensor);
 
       // 2. Crear umbrales si se especificaron
@@ -642,118 +651,123 @@ export class ProvisioningService {
     const MAX_ATTEMPTS = 3;
     const RATE_LIMIT_WINDOW_MS = 60000; // 1 minuto
 
-    // Buscar sensor por claim_token
-    const sensor = await this.sensorRepo.findOne({
-      where: { claimToken: dto.claimToken },
-      relations: ['device'],
-    });
+    // CRITICAL: Wrap entire operation in transaction with pessimistic lock
+    // Prevents race conditions when multiple confirmations arrive simultaneously
+    return withTransaction(this.dataSource, async (manager) => {
+      // Buscar sensor por claim_token WITH LOCK
+      const sensor = await manager.findOne(Sensor, {
+        where: { claimToken: dto.claimToken },
+        relations: ['device'],
+        lock: { mode: 'pessimistic_write' },
+      });
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // VALIDACIÓN 1: Token existe
-    // ═══════════════════════════════════════════════════════════════════════
-    if (!sensor) {
-      // No revelar si el token existe o no
-      throw new BadRequestException('Token inválido o expirado');
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // VALIDACIÓN 2: Rate limiting por token
-    // ═══════════════════════════════════════════════════════════════════════
-    const now = new Date();
-    
-    // Verificar si excedió intentos
-    if (sensor.confirmAttempts >= MAX_ATTEMPTS) {
-      // Liberar sensor y invalidar token
-      sensor.status = 'pending_claim';
-      sensor.claimToken = null;
-      sensor.claimTokenExpires = null;
-      sensor.reservedByUserId = null;
-      sensor.reservedAt = null;
-      sensor.confirmAttempts = 0;
-      await this.sensorRepo.save(sensor);
-      throw new BadRequestException('Máximo de intentos excedido. El sensor ha sido liberado.');
-    }
-
-    // Rate limit: 1 intento por minuto
-    if (sensor.lastConfirmAttempt) {
-      const timeSinceLastAttempt = now.getTime() - sensor.lastConfirmAttempt.getTime();
-      if (timeSinceLastAttempt < RATE_LIMIT_WINDOW_MS) {
-        throw new BadRequestException(
-          `Demasiados intentos. Espere ${Math.ceil((RATE_LIMIT_WINDOW_MS - timeSinceLastAttempt) / 1000)} segundos.`
-        );
+      // ═══════════════════════════════════════════════════════════════════════
+      // VALIDACIÓN 1: Token existe
+      // ═══════════════════════════════════════════════════════════════════════
+      if (!sensor) {
+        // No revelar si el token existe o no
+        throw new BadRequestException('Token inválido o expirado');
       }
-    }
 
-    // Registrar intento
-    sensor.confirmAttempts += 1;
-    sensor.lastConfirmAttempt = now;
-    await this.sensorRepo.save(sensor);
+      // ═══════════════════════════════════════════════════════════════════════
+      // VALIDACIÓN 2: Rate limiting por token
+      // ═══════════════════════════════════════════════════════════════════════
+      const now = new Date();
+      
+      // Verificar si excedió intentos
+      if (sensor.confirmAttempts >= MAX_ATTEMPTS) {
+        // Liberar sensor y invalidar token (atomic within transaction)
+        sensor.status = 'pending_claim';
+        sensor.claimToken = null;
+        sensor.claimTokenExpires = null;
+        sensor.reservedByUserId = null;
+        sensor.reservedAt = null;
+        sensor.confirmAttempts = 0;
+        await manager.save(sensor);
+        throw new BadRequestException('Máximo de intentos excedido. El sensor ha sido liberado.');
+      }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // VALIDACIÓN 3: Estado correcto
-    // ═══════════════════════════════════════════════════════════════════════
-    if (sensor.status !== 'pending_confirmation') {
-      throw new BadRequestException('Token inválido o expirado');
-    }
+      // Rate limit: 1 intento por minuto
+      if (sensor.lastConfirmAttempt) {
+        const timeSinceLastAttempt = now.getTime() - sensor.lastConfirmAttempt.getTime();
+        if (timeSinceLastAttempt < RATE_LIMIT_WINDOW_MS) {
+          throw new BadRequestException(
+            `Demasiados intentos. Espere ${Math.ceil((RATE_LIMIT_WINDOW_MS - timeSinceLastAttempt) / 1000)} segundos.`
+          );
+        }
+      }
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // VALIDACIÓN 4: Token no expirado
-    // ═══════════════════════════════════════════════════════════════════════
-    if (sensor.claimTokenExpires && now > sensor.claimTokenExpires) {
-      // Revertir a pending_claim
-      sensor.status = 'pending_claim';
+      // Registrar intento (atomic within transaction)
+      sensor.confirmAttempts += 1;
+      sensor.lastConfirmAttempt = now;
+      await manager.save(sensor);
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // VALIDACIÓN 3: Estado correcto
+      // ═══════════════════════════════════════════════════════════════════════
+      if (sensor.status !== 'pending_confirmation') {
+        throw new BadRequestException('Token inválido o expirado');
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // VALIDACIÓN 4: Token no expirado
+      // ═══════════════════════════════════════════════════════════════════════
+      if (sensor.claimTokenExpires && now > sensor.claimTokenExpires) {
+        // Revertir a pending_claim (atomic within transaction)
+        sensor.status = 'pending_claim';
+        sensor.claimToken = null;
+        sensor.claimTokenExpires = null;
+        sensor.reservedByUserId = null;
+        sensor.reservedAt = null;
+        sensor.confirmAttempts = 0;
+        await manager.save(sensor);
+        throw new BadRequestException('Token expirado. El sensor ha sido liberado.');
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // GENERAR IDENTIDAD DEL SENSOR (API Key)
+      // ═══════════════════════════════════════════════════════════════════════
+      const sensorApiKey = this.generateSensorApiKey();
+      const apiKeyPrefix = sensorApiKey.substring(0, 8);
+      const apiKeyHash = this.hashApiKey(sensorApiKey);
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // ACTIVAR SENSOR (ALL CHANGES ATOMIC)
+      // ═══════════════════════════════════════════════════════════════════════
+      // Nombre temporal - el admin lo cambia después
+      sensor.name = `${sensor.sensorType}_${sensor.sensorUuid.substring(0, 8)}`;
+      sensor.status = 'online';
+      sensor.isActive = true;
+      
+      // Limpiar claim_token (ya no se usa)
       sensor.claimToken = null;
       sensor.claimTokenExpires = null;
-      sensor.reservedByUserId = null;
-      sensor.reservedAt = null;
       sensor.confirmAttempts = 0;
-      await this.sensorRepo.save(sensor);
-      throw new BadRequestException('Token expirado. El sensor ha sido liberado.');
-    }
+      sensor.lastConfirmAttempt = null;
+      
+      // Establecer identidad permanente
+      sensor.apiKeyHash = apiKeyHash;
+      sensor.apiKeyPrefix = apiKeyPrefix;
+      sensor.activatedAt = now;
+      sensor.activatedFromIp = clientIp || null;
+      
+      sensor.updatedAt = now;
+      await manager.save(sensor);
 
-    // ═══════════════════════════════════════════════════════════════════════
-    // GENERAR IDENTIDAD DEL SENSOR (API Key)
-    // ═══════════════════════════════════════════════════════════════════════
-    const sensorApiKey = this.generateSensorApiKey();
-    const apiKeyPrefix = sensorApiKey.substring(0, 8);
-    const apiKeyHash = this.hashApiKey(sensorApiKey);
-
-    // ═══════════════════════════════════════════════════════════════════════
-    // ACTIVAR SENSOR
-    // ═══════════════════════════════════════════════════════════════════════
-    // Nombre temporal - el admin lo cambia después
-    sensor.name = `${sensor.sensorType}_${sensor.sensorUuid.substring(0, 8)}`;
-    sensor.status = 'online';
-    sensor.isActive = true;
-    
-    // Limpiar claim_token (ya no se usa)
-    sensor.claimToken = null;
-    sensor.claimTokenExpires = null;
-    sensor.confirmAttempts = 0;
-    sensor.lastConfirmAttempt = null;
-    
-    // Establecer identidad permanente
-    sensor.apiKeyHash = apiKeyHash;
-    sensor.apiKeyPrefix = apiKeyPrefix;
-    sensor.activatedAt = now;
-    sensor.activatedFromIp = clientIp || null;
-    
-    sensor.updatedAt = now;
-    await this.sensorRepo.save(sensor);
-
-    return {
-      sensorUuid: sensor.sensorUuid,
-      sensorId: sensor.id,
-      name: sensor.name,
-      sensorType: sensor.sensorType,
-      unit: sensor.unit,
-      deviceUuid: sensor.device.deviceUuid,
-      deviceName: sensor.device.name,
-      status: 'ONLINE',
-      sensorApiKey: sensorApiKey, // ⚠️ SOLO SE MUESTRA UNA VEZ
-      apiKeyPrefix: apiKeyPrefix,
-      message: '⚠️ Guarde el API Key de forma segura. No se mostrará de nuevo.',
-    };
+      return {
+        sensorUuid: sensor.sensorUuid,
+        sensorId: sensor.id,
+        name: sensor.name,
+        sensorType: sensor.sensorType,
+        unit: sensor.unit,
+        deviceUuid: sensor.device.deviceUuid,
+        deviceName: sensor.device.name,
+        status: 'ONLINE',
+        sensorApiKey: sensorApiKey, // ⚠️ SOLO SE MUESTRA UNA VEZ
+        apiKeyPrefix: apiKeyPrefix,
+        message: '⚠️ Guarde el API Key de forma segura. No se mostrará de nuevo.',
+      };
+    });
   }
 
   /**
@@ -848,8 +862,8 @@ export class ProvisioningService {
   /**
    * Elimina un sensor (soft delete)
    * 
+   * PHASE 4 FIX: Usa is_deleted y deleted_at en lugar de status revocado
    * Permite eliminar en cualquier estado.
-   * El sensor se marca como revocado automáticamente.
    */
   async deleteSensor(sensorId: string): Promise<{ message: string }> {
     const sensor = await this.sensorRepo.findOne({
@@ -861,16 +875,17 @@ export class ProvisioningService {
       throw new NotFoundException(`Sensor ${sensorId} no encontrado`);
     }
 
-    // Ya no bloqueamos - permitimos eliminar en cualquier estado
-    // Soft delete: marcar como revocado
+    // PHASE 4 FIX: Soft delete - marcar is_deleted=1 y deleted_at
     await this.sensorRepo.update(sensorId, {
+      isDeleted: true,
+      deletedAt: new Date(),
       isActive: false,
       status: 'revoked',
       updatedAt: new Date(),
     });
 
     return {
-      message: `Sensor ${sensor.name || sensorId} eliminado correctamente.`,
+      message: `Sensor ${sensor.name || sensorId} eliminado correctamente (soft delete).`,
     };
   }
 

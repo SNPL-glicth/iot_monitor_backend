@@ -79,6 +79,11 @@ export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
     this.timer = setInterval(() => void this.tick(), intervalMs);
   }
 
+  // Feature flag: disable ML events polling when event-driven is active
+  private get shouldPollMlEvents(): boolean {
+    return process.env.REALTIME_POLL_ML_EVENTS !== 'false';
+  }
+
   onModuleDestroy() {
     if (this.timer) {
       clearInterval(this.timer);
@@ -181,7 +186,15 @@ export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
       const mlEventsHash = hashJson(mlEvents);
       if (this.lastMlEventsHash !== mlEventsHash) {
         this.lastMlEventsHash = mlEventsHash;
-        this.gateway.broadcast('ml/events/active', mlEvents);
+        
+        // Only broadcast ML events via polling if event-driven is disabled
+        if (this.shouldPollMlEvents) {
+          this.gateway.broadcast('ml/events/active', mlEvents);
+          this.logger.warn(
+            ` POLLING sent ml/events/active (${mlEvents.length} events) - ` +
+            `May duplicate event-driven broadcasts (set REALTIME_POLL_ML_EVENTS=false to disable)`,
+          );
+        }
       }
 
       // PASO 3: Emitir estado consolidado de sensores

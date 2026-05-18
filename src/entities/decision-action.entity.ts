@@ -11,10 +11,10 @@ import { Device } from './device.entity';
 @Entity({ name: 'decision_actions' })
 export class DecisionAction {
   @PrimaryGeneratedColumn({ type: 'bigint' })
-  id: number;
+  id!: number;
 
   @Column({ name: 'device_id', type: 'bigint' })
-  deviceId: number;
+  deviceId!: number;
 
   @ManyToOne(() => Device, { nullable: true })
   @JoinColumn({ name: 'device_id' })

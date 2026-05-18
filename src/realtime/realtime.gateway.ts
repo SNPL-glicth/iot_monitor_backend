@@ -47,8 +47,13 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection {
   afterInit(server: Server) {
     server.use(async (socket, next) => {
       try {
+        // Try auth token from Socket.IO auth first (for Flutter/mobile)
+        const authToken = socket.handshake.auth.token;
+        // Fallback to cookie-based auth (for web)
         const cookies = parseCookies(socket.request.headers.cookie);
-        const token = cookies[ACCESS_TOKEN_COOKIE];
+        const cookieToken = cookies[ACCESS_TOKEN_COOKIE];
+        const token = authToken || cookieToken;
+        
         if (!token) {
           return next(new Error('unauthorized'));
         }
@@ -87,7 +92,11 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection {
       | 'sensors/consolidated',
     payload: unknown,
   ) {
-    this.server.emit(event, payload);
+    // CRITICAL FIX: Flutter expects {event, data} structure
+    this.server.emit('message', {
+      event: event,
+      data: payload,
+    });
   }
 
   // (Opcional) ping manual

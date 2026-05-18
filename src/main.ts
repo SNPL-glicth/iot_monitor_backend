@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { Logger } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { HttpLoggingInterceptor } from './common/interceptors/http-logging.interceptor';
 import cookieParser from 'cookie-parser';
 
@@ -18,6 +18,16 @@ async function bootstrap() {
 
   // Logs dinámicos de requests/responses (útil para ver acciones en tiempo real)
   app.useGlobalInterceptors(new HttpLoggingInterceptor());
+
+  // Validación global de DTOs (strip non-whitelisted properties, transform types)
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      forbidNonWhitelisted: false,
+      transform: true,
+      transformOptions: { enableImplicitConversion: true },
+    }),
+  );
 
   // CORS
   //
@@ -44,10 +54,17 @@ async function bootstrap() {
 
   const allowedOrigins = corsOrigins.length > 0 ? corsOrigins : defaultDevOrigins;
 
+  const isProduction = process.env.NODE_ENV === 'production';
+
   app.enableCors({
     origin: (origin, callback) => {
-      // requests sin Origin (curl/postman)
-      if (!origin) return callback(null, true);
+      // In production, require Origin header (blocks curl/postman without explicit origin)
+      if (!origin) {
+        if (isProduction) {
+          return callback(new Error('Origin header required in production'), false);
+        }
+        return callback(null, true);
+      }
 
       if (allowedOrigins.includes(origin)) {
         return callback(null, true);

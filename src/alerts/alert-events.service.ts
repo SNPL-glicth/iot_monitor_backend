@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, DataSource } from 'typeorm';
-
+import { withTransaction } from '../common/utils/transaction.utils';
 import { AlertEvent } from '../entities/alert-event.entity';
 
 /**
@@ -143,29 +143,51 @@ export class AlertEventsService {
 
   /**
    * Marca un evento como acknowledged.
+   * CRITICAL: Uses transaction to prevent lost updates
    */
   async acknowledgeEvent(eventId: string, userId: string): Promise<void> {
-    await this.alertEventRepo.update(
-      { id: eventId },
-      {
-        status: 'acknowledged',
-        acknowledgedAt: new Date(),
-        acknowledgedBy: userId,
-      },
-    );
+    await withTransaction(this.dataSource, async (manager) => {
+      // Lock row to prevent concurrent acknowledgments
+      const event = await manager.findOne(AlertEvent, {
+        where: { id: eventId },
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (!event) {
+        throw new Error(`AlertEvent ${eventId} not found`);
+      }
+
+      // Only acknowledge if not already acknowledged/resolved
+      if (event.status === 'active') {
+        event.status = 'acknowledged';
+        event.acknowledgedAt = new Date();
+        event.acknowledgedBy = userId;
+        await manager.save(event);
+      }
+    });
   }
 
   /**
    * Marca un evento como resuelto.
+   * CRITICAL: Uses transaction to prevent lost updates
    */
   async resolveEvent(eventId: string, userId: string): Promise<void> {
-    await this.alertEventRepo.update(
-      { id: eventId },
-      {
-        status: 'resolved',
-        resolvedAt: new Date(),
-        resolvedBy: userId,
-      },
-    );
+    await withTransaction(this.dataSource, async (manager) => {
+      // Lock row to prevent concurrent resolutions
+      const event = await manager.findOne(AlertEvent, {
+        where: { id: eventId },
+        lock: { mode: 'pessimistic_write' },
+      });
+
+      if (!event) {
+        throw new Error(`AlertEvent ${eventId} not found`);
+      }
+
+      // Can resolve from any state
+      event.status = 'resolved';
+      event.resolvedAt = new Date();
+      event.resolvedBy = userId;
+      await manager.save(event);
+    });
   }
 }

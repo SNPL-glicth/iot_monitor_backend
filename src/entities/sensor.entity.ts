@@ -166,6 +166,16 @@ export class Sensor {
   @Column({ name: 'updated_at', type: 'datetime2', nullable: true })
   updatedAt?: Date | null;
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // SOFT DELETE (PHASE 4 FIX)
+  // ══════════════════════════════════════════════════════════════════════════
+
+  @Column({ name: 'is_deleted', type: 'bit', default: false })
+  isDeleted!: boolean;
+
+  @Column({ name: 'deleted_at', type: 'datetime2', nullable: true })
+  deletedAt?: Date | null;
+
   @OneToMany(() => SensorReading, (sr) => sr.sensor)
   readings!: SensorReading[];
 

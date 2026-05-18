@@ -1,10 +1,12 @@
-import { Controller, Get, Post, Patch, Param, Query, Body, NotFoundException } from '@nestjs/common';
+import { Controller, Get, Post, Patch, Param, Query, Body, NotFoundException, UseGuards } from '@nestjs/common';
+import { AuthGuard } from '@nestjs/passport';
 import { IntelligenceService } from './intelligence.service';
 import { MlPipelineService } from './ml-pipeline.service';
 import { IntelligenceHealthDto, IntelligencePredictionDto, IntelligenceWarningDto } from './intelligence.dto';
 import { DecisionActionDto, DecisionActionListResponseDto, UpdateDecisionStatusDto } from './decision-action.dto';
 
 @Controller('intelligence')
+@UseGuards(AuthGuard('jwt'))
 export class IntelligenceController {
   constructor(
     private readonly intelligenceService: IntelligenceService,
