@@ -1,377 +1,218 @@
-# iot_monitor_backend
- 
- ## Qué hace esta parte del sistema
- 
- Este proyecto es el **backend principal** (NestJS + TypeORM + SQL Server) que expone APIs consumidas por el dashboard Flutter.
- 
- En el estado actual implementa:
- 
- - Autenticación JWT y roles (`admin`, `operator`, `viewer`).
- - Endpoints de monitoreo (`/monitoring/*`) sobre dispositivos, sensores, lecturas, alertas, predicciones y eventos ML.
- - Endpoints CRM (`/crm/*`) para pantallas de administración/negocio en el frontend.
- - Notificaciones (`/notifications/*`) basadas en `dbo.alert_notifications` (SSOT para unread).
- - Push notifications “best-effort” vía FCM (si hay configuración) y emails para alertas críticas (si hay configuración).
- - Módulo de inteligencia con utilidades de diagnóstico y conversión de `predictions -> ml_events` en escenarios donde existan predicciones sin evento asociado.
- 
- ## Qué problema resuelve
- 
- - Centraliza el acceso a datos IoT para la UI:
-   - La app Flutter no consulta la BD directamente.
- - Provee un contrato HTTP estable para:
-   - Estado (snapshots) y eventos (notificaciones).
-   - Gestión de usuarios.
- - Simplifica la UI devolviendo payloads ya procesados/filtrados (por ejemplo, `/notifications/unread` aplica prioridad y filtros).
- 
- ## Cómo funciona internamente (flujo real)
- 
- ### Arranque y CORS
- 
- - Entry point: `src/main.ts`.
- - Carga `.env` via `dotenv/config`.
- - Habilita:
-   - `cookie-parser` + middleware CSRF.
-   - interceptor global de logging HTTP.
-   - CORS con lista configurable (`CORS_ORIGINS`) y defaults para dev (incluye `http://10.0.2.2:3000`).
- 
- ### Notificaciones (unread / mark-read)
- 
- - SSOT de notificaciones: `dbo.alert_notifications`.
- - `GET /notifications/unread`:
-   - Trae notificaciones no leídas.
-   - Ordena por prioridad:
-     - `source='alert'` antes que `source='ml_event'`.
-     - `critical` antes que `warning`.
-     - `created_at` desc.
-   - Filtra sensores por estado operacional (solo `NORMAL`, `WARNING`, `ALERT` o `NULL`).
- - `POST /notifications/mark-read`:
-   - Actualiza `is_read=1` y `read_at` para una lista de IDs.
- 
- ### Push notifications (trigger interno)
- 
- - Endpoint interno: `POST /notifications/internal/trigger-push`.
- - Autenticación: header `X-Internal-Key` debe coincidir con `INTERNAL_API_KEY`.
- - Casos:
-   - `type='alert'` + `alertId`: envía push/email para alerta crítica.
-   - `type='decision'` + `deviceId` + `title`: envía push “custom” para una decisión.
- - Envío real:
-   - Push se envía solo si `FCM_SERVER_KEY` está configurada.
-   - Emails críticos se envían solo si `CRITICAL_ALERT_EMAILS` y configuración SMTP están presentes; si falta `SMTP_API_URL`, el backend registra un log `[EMAIL PENDING]`.
- 
- ### Inteligencia (ML pipeline)
- 
- - Existe lógica de diagnóstico/conversión en `src/intelligence/ml-pipeline.service.ts`:
-   - `diagnosePipeline()` analiza cuántas predicciones tienen o no eventos asociados.
-   - `convertPredictionsToEvents()` toma predicciones sin `ml_events` y crea eventos según reglas (anomalía, riesgo, severidad, umbrales, tendencia).
- 
- ## Cómo se comunica con las otras partes
- 
- - **SQL Server (`iot_database`)**:
-   - Lee tablas y vistas (dispositivos, sensores, lecturas, alertas, predicciones, eventos ML, notificaciones, etc.).
-   - Escribe:
-     - `alert_notifications` (mark read).
-     - `push_tokens` (registro de tokens FCM).
-     - potencialmente `ml_events` (conversión de predicciones en escenarios de reparación).
- - **Frontend (`iot_monito_dashboard`)**:
-   - Consume `/auth/*`, `/crm/*`, `/monitoring/*`, `/notifications/*`.
- - **Ingesta (`iot_ingest_services`)**:
-   - Inserta lecturas en BD; el backend las expone en endpoints de lectura.
- - **ML (`iot_machine_learning`)**:
-   - Inserta `predictions`/`ml_events`/`alert_notifications`; el backend los expone.
- - **Worker (`iot_worker`)**:
-   - Puede llamar el endpoint interno de push cuando genera decisiones.
- 
- ## Ventajas del enfoque actual
- 
- - API central para múltiples vistas del frontend (monitoring + CRM + notificaciones).
- - Notificaciones desacopladas como tabla (soporta UX de “campanita”).
- - Push/email son opcionales y no bloquean el sistema si faltan credenciales.
- 
- ## Desventajas o limitaciones actuales
- 
- - Parte de la lógica de dominio está repartida (SQL + Python + Nest), y el backend incluye lógica “de reparación” del pipeline ML (conversión prediction→event) que puede solaparse con pipelines Python.
- - Emails vía SMTP no están completamente automatizados si no se configura `SMTP_API_URL`.
- - El sistema “en tiempo real” en UI depende de polling del frontend.
- 
- ## Decisiones técnicas tomadas y por qué
- 
- - **TypeORM con `synchronize: false`**: el esquema se gestiona por scripts/migraciones SQL.
- - **Endpoint interno para push**: permite disparar notificaciones desde workers Python sin JWT.
- - **SSOT de notificaciones**: `alert_notifications` evita que la UI tenga que deducir unread desde `alerts`/`ml_events`.
- 
- ## Qué NO hace esta parte
- 
- - No ejecuta ingesta directa desde sensores.
- - No entrena modelos ML.
- - No reemplaza `telemetry_iot` (servicio separado de telemetría).
- 
- ## Preguntas tipo debate o entrevista
- 
- ### ¿Por qué existe un endpoint interno (`/notifications/internal/trigger-push`) y no se usa JWT?
- 
- Porque está diseñado para integraciones servicio-a-servicio (por ejemplo, workers Python). El control de acceso actual se hace por `INTERNAL_API_KEY`.
- 
- ### ¿Qué pasa si no hay configuración de FCM/SMTP?
- 
- - Si falta `FCM_SERVER_KEY`, el backend no envía push (solo loguea).
- - Si falta `CRITICAL_ALERT_EMAILS` o SMTP, no envía emails.
- - El flujo principal de monitoreo/unread sigue funcionando.
- 
- ---
- 
- ## Apéndice: contenido previo del README
- 
- <p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
- </p>
+# IoT Monitor Backend
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Backend API para sistema IoT industrial (DLC — embotelladoras). Expone endpoints REST consumidos por dashboard Flutter, workers y servicios ML.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Stack Tecnologico
 
-## Descripción
+| Capa | Tecnologia |
+|------|------------|
+| Framework | NestJS 11 |
+| ORM | TypeORM 0.3 |
+| Base de datos | SQL Server (mssql) |
+| Auth | JWT (Passport) + Refresh tokens + Rate limiting |
+| Push | FCM (best-effort) |
+| Email | SMTP opcional |
+| Realtime | WebSockets (Socket.IO) + polling fallback |
+| Cache | In-memory (Redis recomendado para produccion multi-instancia) |
 
-Backend NestJS para un sistema de **IoT Monitoring / IoT System** conectado a SQL Server (Docker / SQL Server Express).
+## Arquitectura
 
-- Base de datos: `iot_monitoring_system`.
-- ORM: TypeORM con SQL Server (`mssql`).
-- Dominio principal: `devices`, `sensors`, `sensor_readings`, `alert_thresholds`, `alerts`.
+```
+AppModule
+├── AuthModule (login, refresh, logout, JWT strategy, rate limiting)
+├── MonitoringModule (devices, sensors, readings, alerts, thresholds, diagnostics)
+│   ├── SensorQueryService — consultas de dispositivos, sensores, lecturas, alertas
+│   ├── SensorThresholdService — CRUD de umbrales, perfiles, historial
+│   ├── SensorMetricsService — metricas, agregaciones, lecturas historicas
+│   ├── SensorDiagnosticService — endpoints de debug y diagnostico
+│   ├── AlertMaintenanceService — TTL cleanup, auto-resolve via SP
+│   └── DevToolsService — operaciones destructivas de desarrollo
+├── NotificationsModule (unread, mark-read, push FCM, email SMTP)
+├── IntelligenceModule (predicciones ML, eventos ML, decisiones)
+├── CrmModule (dashboard CRM, perfiles de dispositivo)
+├── RealtimeModule (WebSocket gateway + poller)
+├── ProvisioningModule (registro de dispositivos, API keys, sensores)
+├── EventsModule (event bus Redis, DLQ, idempotencia)
+├── MqttModule (publicacion de alertas via MQTT)
+└── AdminUsersModule (CRUD de usuarios)
+```
 
-## Estado actual (diciembre 2025)
-- Exposición de datos para el dashboard Flutter (`iot_monito_dashboard`).
-- Separación conceptual en UI y flujos:
-  - **Alertas**: eventos operacionales (umbral/alertas activas).
-  - **Predicciones (ML)**: resultados de modelos (`dbo.predictions`).
-  - **Advertencias (ML)**: eventos ML activos/ack (`dbo.ml_events`) separados de las alertas operacionales.
-  - **Notificaciones**: capa independiente (`dbo.alert_notifications`) que representa el estado read/unread para campanitas/badges.
-
-### Endpoints relevantes (consumo desde dashboards)
-- Monitoring:
-  - `GET /monitoring/devices`
-  - `GET /monitoring/readings/latest`
-  - `GET /monitoring/sensors/:sensorId/readings?limit=...`
-  - `GET /monitoring/alerts/active` (alertas operacionales)
-  - `GET /monitoring/predictions` (predicciones ML)
-  - `GET /monitoring/ml-events/active?limit=...` (advertencias/eventos ML activos/ack)
-- CRM:
-  - `GET /crm/dashboard`
-  - `GET /crm/devices`
-  - `GET /crm/devices/:id/profile-full`
-- Notificaciones:
-  - `GET /notifications/unread` → snapshot de notificaciones no leídas (alertas operacionales + ML) desde `alert_notifications`.
-  - `POST /notifications/mark-read` → marca notificaciones como leídas.
+**Principios SOLID aplicados:** cada servicio tiene una unica responsabilidad (SRP). Los God Classes han sido refactorizados en sub-servicios especializados. Ver `docs/ARCHITECTURE.md` para detalles.
 
 ## Requisitos previos
 
-- Node.js y npm instalados.
-- Instancia de **SQL Server** accesible (puede ser contenedor Docker) con el puerto expuesto (ej: `localhost,1434`).
-- Usuario `sa` (o equivalente) con permisos para crear bases de datos.
+- Node.js 18+ y npm
+- SQL Server accesible (Docker recomendado) con puerto expuesto
+- Usuario con permisos para crear bases de datos
 
-## Configuración de la base de datos
+## Instalacion rapida
 
-1. Ejecutar el script T-SQL que crea la base de datos `iot_monitoring_system`, sus tablas, vistas, índices, triggers, stored procedures y datos de ejemplo.
+1. **Clonar y dependencias:**
+   ```bash
+   git clone <repo-url>
+   cd iot_monitor_backend
+   npm install
+   ```
 
-   Ejemplo usando `sqlcmd`:
+2. **Configurar variables de entorno:**
+   ```bash
+   cp .env.example .env
+   # Editar .env con credenciales reales
+   ```
 
+3. **Crear base de datos:**
    ```bash
    sqlcmd -S localhost,1434 -U sa -P "<TU_PASSWORD>" -i iot_schema.sql
    ```
 
-2. Verificar que las tablas existen (el script ya incluye consultas como `SELECT name FROM sys.tables`).
+4. **Ejecutar:**
+   ```bash
+   # Desarrollo con recarga automatica
+   npm run start:dev
+   
+   # Produccion
+   npm run build
+   npm run start:prod
+   ```
 
-## Documentación técnica
+El backend escucha en `http://localhost:3000` (o el puerto definido en `PORT`).
 
-- [Arquitectura](docs/ARCHITECTURE.md) — diagrama de módulos, decisiones técnicas, flujo de datos.
-- [Contribuir](docs/CONTRIBUTING.md) — estándares de código, convenciones de commits, checklist PR.
-- [Seguridad](docs/SECURITY.md) — política de reporte de vulnerabilidades, medidas de seguridad implementadas.
-- [Changelog](docs/CHANGELOG.md) — historial de cambios notables.
+## Variables de entorno
 
-## Variables de entorno (`.env`)
+Ver `.env.example` para lista completa. Las mas importantes:
 
-En la raíz del backend (`iot_monitor_backend`) crea un archivo `.env` copiando `.env.example`:
+| Variable | Descripcion | Ejemplo |
+|----------|-------------|---------|
+| `DB_HOST` | Servidor SQL Server | `localhost` |
+| `DB_PORT` | Puerto SQL Server | `1434` |
+| `DB_USER` | Usuario BD | `sa` |
+| `DB_PASSWORD` | Contrasena BD | `TuPassword` |
+| `DB_NAME` | Nombre BD | `iot_monitoring_system` |
+| `JWT_SECRET` | Secret JWT (min 32 chars) | `tu-secret-largo-aqui` |
+| `REFRESH_TOKEN_SECRET` | Secret refresh tokens | `otro-secret-largo` |
+| `CORS_ORIGINS` | Origenes permitidos (prod) | `https://app.tudominio.com` |
+| `FCM_SERVER_KEY` | Clave FCM (opcional) | `AAAA...` |
+| `INTERNAL_API_KEY` | Key para endpoints servicio-a-servicio | `internal-api-key` |
 
-```bash
-cp .env.example .env
-```
-
-**NUNCA subas `.env` con credenciales reales al repositorio.**
-
-```bash
-DB_DIALECT=mssql
-DB_HOST=localhost
-DB_PORT=1434
-DB_USER=sa
-DB_PASSWORD=TU_PASSWORD
-DB_NAME=iot_monitoring_system
-PORT=3000
-```
-
-El proyecto carga estas variables desde `src/main.ts` usando `dotenv`.
-
-## Instalación de dependencias
-
-```bash
-npm install
-```
-
-## Ejecutar el backend
-
-```bash
-# desarrollo sin watch
-npm run start
-
-# desarrollo con recarga automática
-npm run start:dev
-```
-
-El backend quedará escuchando por defecto en `http://localhost:3000` (o en el puerto definido en `PORT`).
-
-## Seguridad, roles y logs
-
-- Autenticación: JWT (Passport).
-- Roles soportados en la app: `admin`, `operator`, `viewer`.
-- Logging:
-  - Interceptor HTTP global (request/response con tiempo, status y usuario si aplica).
-  - Logs de login y CRUD de usuarios admin.
+> **Seguridad:** `.env` esta en `.gitignore`. NUNCA commitear credenciales reales.
 
 ## Endpoints principales
 
-### Auth
+### Auth (`/auth`)
 
-- `POST /auth/login`
-  - Body: `{ "username": string, "password": string }`
-  - Respuesta: `{ access_token, role, user }`
+| Metodo | Endpoint | Descripcion | Roles |
+|--------|----------|-------------|-------|
+| POST | `/auth/login` | Login JWT + cookies | — |
+| POST | `/auth/refresh` | Refresh token rotation | — |
+| POST | `/auth/logout` | Logout + revocacion | — |
 
-### Admin (solo `admin`)
+### Monitoring (`/monitoring`)
 
-- CRUD de usuarios bajo `/admin/users`.
-  - `GET /admin/users`
-  - `POST /admin/users`
-  - `PUT /admin/users/:id`
-  - `DELETE /admin/users/:id`
+| Metodo | Endpoint | Descripcion | Roles |
+|--------|----------|-------------|-------|
+| GET | `/monitoring/devices` | Lista dispositivos con sensores | admin, operator, viewer |
+| GET | `/monitoring/devices/:id` | Detalle de dispositivo | admin, operator, viewer |
+| GET | `/monitoring/readings/latest` | Ultimas lecturas por sensor | admin, operator, viewer |
+| GET | `/monitoring/sensors/:id/readings` | Historial de lecturas | admin, operator, viewer |
+| GET | `/monitoring/alerts/active` | Alertas activas/ack | admin, operator, viewer |
+| GET | `/monitoring/predictions` | Predicciones ML | admin, operator, viewer |
+| GET | `/monitoring/ml-events/active` | Eventos ML activos | admin, operator, viewer |
+| GET | `/monitoring/sensors/:id/thresholds` | Umbrales del sensor | admin, operator, viewer |
+| POST | `/monitoring/sensors/:id/readings` | Insertar lectura (SP) | admin |
+| GET | `/monitoring/sensors/:id/state` | Estado computado del sensor | admin, operator, viewer |
 
-### Monitoring (requiere JWT)
+### CRM (`/crm`)
 
-El módulo `MonitoringModule` expone endpoints REST bajo el prefijo `/monitoring`.
+| Metodo | Endpoint | Descripcion | Roles |
+|--------|----------|-------------|-------|
+| GET | `/crm/devices` | Lista paginada de dispositivos | admin, operator, viewer |
+| GET | `/crm/devices/:id/profile` | Perfil del dispositivo | admin, operator, viewer |
+| GET | `/crm/devices/:id/profile-full` | Perfil completo con KPIs | admin, operator, viewer |
+| GET | `/crm/dashboard` | Dashboard global con KPIs | admin, operator, viewer |
+| GET | `/crm/alerts` | Lista de alertas con filtros | admin, operator, viewer |
+| POST | `/crm/alerts/:id/acknowledge` | Reconocer alerta | admin, operator |
+| POST | `/crm/alerts/:id/resolve` | Resolver alerta | admin, operator |
 
-- Lectura (roles permitidos: `admin`, `operator`, `viewer`)
-  - `GET /monitoring/devices`
-  - `GET /monitoring/devices/:id`
-  - `GET /monitoring/readings/latest`
-  - `GET /monitoring/sensors/:sensorId/readings?limit=100`
-  - `GET /monitoring/alerts/active`
-  - `GET /monitoring/predictions?limit=50`
+### Notifications (`/notifications`)
 
-- Escritura (solo `admin`)
-  - `POST /monitoring/sensors/:sensorId/readings`
-    - Body: `{ "value": number }`
-    - Inserta una lectura usando el stored procedure `sp_insert_reading_and_check_threshold`.
+| Metodo | Endpoint | Descripcion | Roles |
+|--------|----------|-------------|-------|
+| GET | `/notifications/unread` | Notificaciones no leidas | admin, operator, viewer |
+| POST | `/notifications/mark-read` | Marcar como leidas | admin, operator, viewer |
+| POST | `/notifications/internal/trigger-push` | Trigger push interno (API key) | — |
 
-## Cómo integrarlo con el frontend IoT (Flutter)
+### Provisioning (`/devices`)
 
-Desde el frontend puedes consumir este backend haciendo peticiones HTTP a los endpoints anteriores, por ejemplo:
+| Metodo | Endpoint | Descripcion | Roles |
+|--------|----------|-------------|-------|
+| POST | `/devices/create` | Crear dispositivo | admin |
+| POST | `/devices/:uuid/prepare-activation` | Generar codigo de activacion | admin |
+| POST | `/devices/activate` | Activar dispositivo | — |
+| POST | `/devices/:uuid/sensors/define` | Definir sensor | admin |
+| POST | `/devices/sensors/:id/publish` | Publicar sensor | admin |
 
-- Mostrar en un dashboard la lista de dispositivos (`/monitoring/devices`) y sus sensores.
-- Mostrar las últimas lecturas (`/monitoring/readings/latest`).
-- Mostrar gráficas de histórico consultando `/monitoring/sensors/:sensorId/readings`.
-- Enviar lecturas reales desde el dispositivo o un simulador con `POST /monitoring/sensors/:sensorId/readings`.
+## Seguridad
 
-## Notas de diseño
+- **JWT** con access tokens (15 min TTL) y refresh tokens con rotacion
+- **Rate limiting** en login (5 intentos/IP/15 min)
+- **CORS** restringido en produccion (requiere `Origin` header)
+- **Validacion global** de DTOs con `ValidationPipe` (`whitelist: true`)
+- **SQL Injection** mitigado via TypeORM queries parametrizadas y stored procedures
+- **Secrets** validados al arranque (min 32 chars para JWT)
+- **Endpoints internos** protegidos por `INTERNAL_API_KEY` (servicio-a-servicio)
 
-- El mapeo de entidades TypeORM respeta los nombres de tablas y columnas del script T-SQL.
-- `synchronize` está deshabilitado en TypeORM (`synchronize: false`) porque el esquema se gestiona completamente con scripts SQL.
-- Se utilizan vistas (`ViewEntity`) para simplificar consultas de dashboard sin necesidad de construir joins complejos en el código.
+Ver `docs/SECURITY.md` para politica completa y reporte de vulnerabilidades.
 
-## Run tests
+## Tests
 
 ```bash
-# unit tests
+# Unit tests
 npm run test
 
-# e2e tests
+# E2E tests
 npm run test:e2e
 
-# test coverage
+# Cobertura
 npm run test:cov
+
+# Verificacion de tipos
+npx tsc --noEmit
 ```
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+
+## Scripts utiles
 
 ```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
+# Lint
+npm run lint
+
+# Formatear codigo
+npm run format
+
+# Build produccion
+npm run build
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+## Documentacion tecnica
 
-## Resources
+- [Arquitectura](docs/ARCHITECTURE.md) — diagrama de modulos, flujo de datos, decisiones tecnicas
+- [Contribuir](docs/CONTRIBUTING.md) — estandares de codigo, convenciones de commits, checklist PR
+- [Seguridad](docs/SECURITY.md) — politica de reporte de vulnerabilidades
+- [Changelog](docs/CHANGELOG.md) — historial de cambios notables
 
-Check out a few resources that may come in handy when working with NestJS:
+## Decisiones tecnicas clave
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- **TypeORM `synchronize: false`**: esquema gestionado por scripts SQL, no auto-migraciones
+- **Vistas SQL**: `v_devices_with_sensors`, `v_latest_sensor_readings`, `v_active_alerts` simplifican joins complejos
+- **SSOT notificaciones**: `dbo.alert_notifications` evita que la UI deduzca unread desde multiples tablas
+- **Stored procedures**: `sp_insert_reading_and_check_threshold` centraliza logica de evaluacion de umbrales en BD
+- **In-memory cache**: para dashboard KPIs y badges (30-60s TTL). Migrar a Redis para produccion multi-instancia
 
-## Support
+## Limitaciones conocidas
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+- Cache en memoria (no distribuido). Para multi-instancia usar Redis.
+- Realtime via polling; WebSockets disponibles pero no obligatorios.
+- Emails criticos requieren configuracion SMTP completa; sin ella se registran como `[EMAIL PENDING]`.
 
-## Stay in touch
+## Licencia
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
-
----
-
-## Resumen del proyecto IoT
-
-Este backend implementa un sistema de monitoreo IoT en tiempo real sobre SQL Server. Expone datos listos para ser consumidos por un dashboard Flutter.
-
-### Características clave
-
-- Modelado completo de dispositivos, sensores, lecturas, umbrales, alertas y predicciones ML.
-- Datos agregados mediante vistas SQL (`v_devices_with_sensors`, `v_latest_sensor_readings`, `v_active_alerts`).
-- Endpoint extra para predicciones: `GET /monitoring/predictions`.
-- Respuestas ya formateadas para el dashboard (fechas en `dd/MM/yyyy HH:mm`).
-- CORS abierto para desarrollo local.
-- Utilidad simple para hash de contraseñas de usuarios con bcrypt.
-
-### Endpoints usados por el dashboard Flutter
-
-- `GET /monitoring/devices`
-  - Devuelve filas con dispositivos y sus sensores asociados.
-- `GET /monitoring/readings/latest`
-  - Última lectura conocida por sensor (para vistas de estado, no para streaming en tiempo real).
-- `GET /monitoring/alerts/active`
-  - Alertas activas o reconocidas.
-- `GET /monitoring/predictions`
-  - Predicciones generadas por modelos ML para cada sensor.
-- `GET /monitoring/ml-events/active`
-  - Eventos ML activos/ack (advertencias ML semánticas).
-- `GET /notifications/unread`
-  - Notificaciones agregadas (umbral + ML) para la campanita. Ideal para polling cada 2–5s.
-
-Las fechas en estos endpoints se devuelven como cadenas legibles (no en formato ISO crudo) para que el frontend pueda mostrarlas directamente.
+MIT
