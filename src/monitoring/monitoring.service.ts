@@ -348,6 +348,7 @@ export class MonitoringService {
       deviceName: p.device_name ?? '',
       modelName: p.model_name,
       modelVersion: p.model_version,
+      sensorId: p.sensor_id,
     }));
   }
 

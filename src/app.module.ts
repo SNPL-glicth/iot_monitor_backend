@@ -42,6 +42,7 @@ import { AlertEvent } from './entities/alert-event.entity';
 import { MqttModule } from './mqtt/mqtt.module';
 import { BigIntSubscriber } from './common/subscribers/bigint.subscriber';
 import { EventsModule } from './events/events.module';
+import { OnboardingModule } from './onboarding/onboarding.module';
 
 @Module({
   imports: [
@@ -101,6 +102,7 @@ import { EventsModule } from './events/events.module';
     AlertEventsModule,
     MqttModule,
     EventsModule,
+    OnboardingModule,
   ],
   controllers: [AppController],
   providers: [AppService],
