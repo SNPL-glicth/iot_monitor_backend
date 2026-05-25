@@ -8,6 +8,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
+import { IsString, IsNotEmpty } from 'class-validator';
 import type { Request, Response } from 'express';
 
 import {
@@ -23,7 +24,12 @@ import { generateCsrfToken } from './auth.utils';
 import { LoginRateLimitGuard, clearLoginAttempts } from './login-rate-limit.guard';
 
 class LoginDto {
+  @IsString()
+  @IsNotEmpty()
   username!: string; // puede ser username o email
+
+  @IsString()
+  @IsNotEmpty()
   password!: string;
 }
 

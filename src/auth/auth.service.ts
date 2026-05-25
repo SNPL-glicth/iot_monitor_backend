@@ -49,6 +49,13 @@ export class AuthService {
       throw new UnauthorizedException('Credenciales inválidas');
     }
 
+    if (!password) {
+      this.logger.warn(
+        `Login fallido userId=${user.id} username=${user.username} reason=missing_password`,
+      );
+      throw new UnauthorizedException('Credenciales inválidas');
+    }
+
     const isValid = await PasswordUtil.comparePassword(password, user.passwordHash);
     if (!isValid) {
       this.logger.warn(
