@@ -9,16 +9,21 @@
  * - Network retries
  */
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnApplicationShutdown } from '@nestjs/common';
 import * as sql from 'mssql';
 
 @Injectable()
-export class IdempotencyService {
+export class IdempotencyService implements OnApplicationShutdown {
   private readonly logger = new Logger(IdempotencyService.name);
   private pool: sql.ConnectionPool | null = null;
 
   constructor() {
     this.initializePool();
+  }
+
+  async onApplicationShutdown(signal?: string) {
+    this.logger.log(`Shutting down IdempotencyService (${signal || 'N/A'})`);
+    await this.close();
   }
 
   /**

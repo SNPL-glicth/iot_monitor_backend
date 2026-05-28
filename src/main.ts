@@ -1,25 +1,97 @@
 import 'dotenv/config';
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
-import { Logger, ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe, INestApplication } from '@nestjs/common';
 import { HttpLoggingInterceptor } from './common/interceptors/http-logging.interceptor';
 import cookieParser from 'cookie-parser';
 
 import { csrfMiddleware } from './common/middleware/csrf.middleware';
+import { assertJwtSecretMeetsMinimumSecurityRequirements } from './config/security-config.validator';
+
+function assertSecurityConfigurationIsValidBeforeServerStarts(): void {
+  assertJwtSecretMeetsMinimumSecurityRequirements();
+}
+
+function extractClientIpFromRequest(request: any): string {
+  const forwarded = request.headers['x-forwarded-for'];
+  if (forwarded) {
+    const ips = Array.isArray(forwarded) ? forwarded[0] : forwarded;
+    return ips.split(',')[0].trim();
+  }
+
+  const realIp = request.headers['x-real-ip'];
+  if (realIp) {
+    return Array.isArray(realIp) ? realIp[0] : realIp;
+  }
+
+  return request.ip || 'unknown';
+}
+
+function buildDebugEndpointRateLimiterTo10RequestsPerMinute(): any {
+  const store = new Map<string, number[]>();
+  const maxRequests = 10;
+  const windowMs = 60 * 1000;
+
+  return (req: any, res: any, next: any) => {
+    const path = req.path || '';
+    if (!path.includes('/debug')) {
+      return next();
+    }
+
+    const ip = extractClientIpFromRequest(req);
+    const now = Date.now();
+    const timestamps = store.get(ip) || [];
+    const validTimestamps = timestamps.filter((t) => now - t < windowMs);
+
+    if (validTimestamps.length >= maxRequests) {
+      return res.status(429).json({
+        statusCode: 429,
+        message: `Debug rate limit exceeded: max ${maxRequests} requests per ${windowMs / 1000}s`,
+      });
+    }
+
+    validTimestamps.push(now);
+    store.set(ip, validTimestamps);
+    next();
+  };
+}
+
+async function shutdownNestApplicationGracefully(
+  app: INestApplication,
+  signal: string,
+): Promise<void> {
+  Logger.log(`${signal} recibido — cerrando servidor...`);
+  await app.close();
+  Logger.log('Servidor cerrado. Saliendo.');
+  process.exit(0);
+}
+
+function registerShutdownHandlersForNestApplication(
+  app: INestApplication,
+): void {
+  process.on('SIGTERM', () =>
+    shutdownNestApplicationGracefully(app, 'SIGTERM'),
+  );
+  process.on('SIGINT', () =>
+    shutdownNestApplicationGracefully(app, 'SIGINT'),
+  );
+}
 
 async function bootstrap() {
+  assertSecurityConfigurationIsValidBeforeServerStarts();
+
   const app = await NestFactory.create(AppModule);
 
-  // Parse cookies early (needed for JWT cookie auth + CSRF)
+  registerShutdownHandlersForNestApplication(app);
+
+  app.use(buildDebugEndpointRateLimiterTo10RequestsPerMinute());
+
   app.use(cookieParser());
 
-  // CSRF protection for cookie-based sessions
   app.use(csrfMiddleware);
 
-  // Logs dinámicos de requests/responses (útil para ver acciones en tiempo real)
   app.useGlobalInterceptors(new HttpLoggingInterceptor());
 
-  // Validación global de DTOs (strip non-whitelisted properties, transform types)
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

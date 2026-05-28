@@ -1,4 +1,4 @@
-import { SensorFinalState as CanonicalSensorFinalState } from '../common/sensor-states';
+import { SensorFinalState as CanonicalSensorFinalState } from '../../common/sensor-states';
 
 /**
  * Estados finales del sensor.

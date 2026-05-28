@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { SensorThresholdService } from './sensor-threshold.service';
-import { MonitoringService } from './monitoring.service';
+import { SensorThresholdService } from './services/sensor-threshold.service';
+import { MonitoringService } from './services/monitoring.service';
 
 const mockMonitoringService = () => ({
   getSensorThresholds: jest.fn(),

@@ -1,6 +1,6 @@
 import { Test, TestingModule } from '@nestjs/testing';
-import { SensorQueryService } from './sensor-query.service';
-import { MonitoringService } from './monitoring.service';
+import { SensorQueryService } from './services/sensor-query.service';
+import { MonitoringService } from './services/monitoring.service';
 
 const mockMonitoringService = () => ({
   getDevicesWithSensors: jest.fn(),

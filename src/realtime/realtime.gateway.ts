@@ -4,6 +4,7 @@ import {
   MessageBody,
   OnGatewayConnection,
   OnGatewayInit,
+  SubscribeMessage,
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
@@ -47,28 +48,25 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection {
   afterInit(server: Server) {
     server.use(async (socket, next) => {
       try {
-        // Try auth token from Socket.IO auth first (for Flutter/mobile)
-        const authToken = socket.handshake.auth.token;
-        // Fallback to cookie-based auth (for web)
+        // Auth por cookie para clientes web (Flutter/mobile usa handshake por mensaje)
         const cookies = parseCookies(socket.request.headers.cookie);
         const cookieToken = cookies[ACCESS_TOKEN_COOKIE];
-        const token = authToken || cookieToken;
-        
-        if (!token) {
-          return next(new Error('unauthorized'));
+
+        if (cookieToken) {
+          const payload = await this.jwtService.verifyAsync(cookieToken, {
+            secret: getJwtSecret(),
+          });
+
+          const user: SocketUser = {
+            userId: String(payload.sub ?? ''),
+            username: String(payload.username ?? ''),
+            role: String(payload.role ?? ''),
+          };
+
+          socket.data.user = user;
         }
 
-        const payload = await this.jwtService.verifyAsync(token, {
-          secret: getJwtSecret(),
-        });
-
-        const user: SocketUser = {
-          userId: String(payload.sub ?? ''),
-          username: String(payload.username ?? ''),
-          role: String(payload.role ?? ''),
-        };
-
-        socket.data.user = user;
+        // Permitir conexión inicial sin auth; Flutter se autentica por mensaje post-handshake
         return next();
       } catch {
         return next(new Error('unauthorized'));
@@ -81,6 +79,75 @@ export class RealtimeGateway implements OnGatewayInit, OnGatewayConnection {
     this.logger.log(
       `client connected id=${client.id} user=${user?.username ?? 'unknown'} role=${user?.role ?? 'unknown'}`,
     );
+  }
+
+  /**
+   * FIX SEGURIDAD: Handshake de autenticación post-conexión.
+   *
+   * El cliente envía { token } después del upgrade WebSocket.
+   * Si el token es inválido o expiró, se cierra la conexión con código 4001.
+   */
+  @SubscribeMessage('auth')
+  async handleAuth(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() data: { token?: string },
+  ) {
+    const token = data?.token;
+
+    if (!token) {
+      this.logger.warn(`auth failed: missing token (client ${client.id})`);
+      client.emit('message', {
+        event: 'auth_error',
+        data: { reason: 'missing_token' },
+      });
+      this._closeWithCode(client, 4001, 'Unauthorized: missing token');
+      return;
+    }
+
+    try {
+      const payload = await this.jwtService.verifyAsync(token, {
+        secret: getJwtSecret(),
+      });
+
+      const user: SocketUser = {
+        userId: String(payload.sub ?? ''),
+        username: String(payload.username ?? ''),
+        role: String(payload.role ?? ''),
+      };
+
+      // Actualizar usuario en socket (soporta reautenticación con token refrescado)
+      client.data.user = user;
+
+      client.emit('message', {
+        event: 'auth_ok',
+        data: { userId: user.userId },
+      });
+
+      this.logger.log(
+        `client authenticated id=${client.id} user=${user.username} role=${user.role}`,
+      );
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : 'invalid_token';
+      this.logger.warn(`auth failed for client ${client.id}: ${reason}`);
+      client.emit('message', {
+        event: 'auth_error',
+        data: { reason: 'invalid_token' },
+      });
+      this._closeWithCode(client, 4001, 'Unauthorized: invalid token');
+    }
+  }
+
+  /**
+   * Cierra la conexión Socket.IO con un código de cierre WebSocket personalizado.
+   */
+  private _closeWithCode(client: Socket, code: number, reason: string): void {
+    // Forzar cierre inmediato del transporte subyacente con código específico
+    const transport = (client as any).conn?.transport;
+    if (transport?.socket) {
+      transport.socket.close(code, reason);
+    } else {
+      client.disconnect(true);
+    }
   }
 
   broadcast(

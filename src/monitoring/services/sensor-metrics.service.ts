@@ -6,9 +6,10 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import { Sensor } from '../entities/sensor.entity';
-import { SensorReading } from '../entities/sensor-reading.entity';
-import { AlertThreshold } from '../entities/alert-threshold.entity';
+import { Sensor } from '../../entities/sensor.entity';
+import { SensorReading } from '../../entities/sensor-reading.entity';
+import { AlertThreshold } from '../../entities/alert-threshold.entity';
+import { formatDateTime } from '../../shared/date-format.util';
 
 /**
  * Servicio dedicado a métricas y lecturas de sensores.
@@ -81,7 +82,7 @@ export class SensorMetricsService {
       avg: agg.avg_val !== null ? Math.round(Number(agg.avg_val) * 100) / 100 : null,
       readings: readings.map((r) => ({
         value: r.value,
-        timestamp: this.formatDateTime(r.timestamp),
+        timestamp: formatDateTime(r.timestamp),
       })),
     };
   }
@@ -116,7 +117,7 @@ export class SensorMetricsService {
         id: r.id,
         value: Number(r.value),
         timestamp: r.timestamp.toISOString(),
-        timestampFormatted: this.formatDateTime(r.timestamp),
+        timestampFormatted: formatDateTime(r.timestamp),
       })),
     };
   }
@@ -266,9 +267,4 @@ export class SensorMetricsService {
     return 'NORMAL';
   }
 
-  private formatDateTime(value: Date | string | null): string | null {
-    if (!value) return null;
-    const date = typeof value === 'string' ? new Date(value) : value;
-    return date.toISOString();
-  }
 }

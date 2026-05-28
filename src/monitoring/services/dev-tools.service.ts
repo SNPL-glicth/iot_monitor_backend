@@ -6,7 +6,7 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import { Sensor } from '../entities/sensor.entity';
+import { Sensor } from '../../entities/sensor.entity';
 
 /**
  * Servicio de utilidades para desarrollo/testing.
@@ -51,7 +51,7 @@ export class DevToolsService {
         executedBy: userId,
         executedAt: new Date().toISOString(),
         warning:
-          '⚠️ Todas las lecturas de sensores han sido eliminadas. Esta acción es irreversible.',
+          'Todas las lecturas de sensores han sido eliminadas. Esta accion es irreversible.',
       };
     } catch (error) {
       this.logger.error(

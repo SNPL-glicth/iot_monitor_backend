@@ -1,9 +1,9 @@
 import { Controller, Get, Param, ParseIntPipe, Query, UseGuards, Logger } from '@nestjs/common';
 import { AuthGuard } from '@nestjs/passport';
-import { Roles } from '../auth/roles.decorator';
-import { RolesGuard } from '../auth/roles.guard';
-import { RateLimitGuard, BatchRateLimit } from '../common/rate-limit.guard';
-import { MonitoringService } from './monitoring.service';
+import { Roles } from '../../auth/roles.decorator';
+import { RolesGuard } from '../../auth/roles.guard';
+import { RateLimitGuard, BatchRateLimit } from '../../common/rate-limit.guard';
+import { MonitoringService } from '../services/monitoring.service';
 
 // Alias controller para exponer /sensors/:sensorId/status sin forzar al frontend
 // a depender del prefijo /monitoring.

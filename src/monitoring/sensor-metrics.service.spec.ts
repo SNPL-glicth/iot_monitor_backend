@@ -1,7 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
-import { SensorMetricsService } from './sensor-metrics.service';
+import { SensorMetricsService } from './services/sensor-metrics.service';
 import { Sensor } from '../entities/sensor.entity';
 import { SensorReading } from '../entities/sensor-reading.entity';
 import { AlertThreshold } from '../entities/alert-threshold.entity';

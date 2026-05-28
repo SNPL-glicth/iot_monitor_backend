@@ -88,8 +88,8 @@ Ver `.env.example` para lista completa. Las mas importantes:
 | `DB_USER` | Usuario BD | `sa` |
 | `DB_PASSWORD` | Contrasena BD | `TuPassword` |
 | `DB_NAME` | Nombre BD | `iot_monitoring_system` |
-| `JWT_SECRET` | Secret JWT (min 32 chars) | `tu-secret-largo-aqui` |
-| `REFRESH_TOKEN_SECRET` | Secret refresh tokens | `otro-secret-largo` |
+| `JWT_SECRET` | Secret JWT (min 32 chars) | `openssl rand -hex 32` |
+| `REFRESH_TOKEN_SECRET` | Secret refresh tokens | `openssl rand -hex 32` |
 | `CORS_ORIGINS` | Origenes permitidos (prod) | `https://app.tudominio.com` |
 | `FCM_SERVER_KEY` | Clave FCM (opcional) | `AAAA...` |
 | `INTERNAL_API_KEY` | Key para endpoints servicio-a-servicio | `internal-api-key` |
