@@ -47,6 +47,10 @@ export class RateLimitStore implements IRateLimitStore {
     }
   }
 
+  reset(clientKey: string): void {
+    this.state.delete(clientKey);
+  }
+
   private pruneIfNeeded(): void {
     const now = Date.now();
     if (now - this.lastPrune < this.pruneIntervalMs) {

@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { IMqttTopicFormatter } from '../interfaces/mqtt-formatter.interface';
-import { MqttConfig } from '../config/mqtt.config';
+import type { MqttConfig } from '../config/mqtt.config';
 
 @Injectable()
 export class MqttTopicFormatter implements IMqttTopicFormatter {

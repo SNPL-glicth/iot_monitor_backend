@@ -1,13 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { IRealtimeSnapshotService, RealtimeSnapshot } from './interfaces/realtime.interfaces';
-
-interface IMonitoringRepository {
-  getLatestSensorReadings(): Promise<unknown[]>;
-  getActiveAlerts(): Promise<unknown[]>;
-  getLatestPredictions(limit: number): Promise<unknown[]>;
-  getActiveMlEvents(limit: number): Promise<unknown[]>;
-  getAllSensorsConsolidatedStatus(): Promise<unknown[]>;
-}
+import { MONITORING_REPOSITORY, MonitoringRepositoryAdapter } from './realtime-monitoring.repository';
 
 @Injectable()
 export class RealtimeSnapshotService implements IRealtimeSnapshotService {
@@ -15,7 +8,10 @@ export class RealtimeSnapshotService implements IRealtimeSnapshotService {
   private cache: Partial<RealtimeSnapshot> = {};
   private snapshotAt = new Date(0);
 
-  constructor(private readonly repository: IMonitoringRepository) {}
+  constructor(
+    @Inject(MONITORING_REPOSITORY)
+    private readonly repository: MonitoringRepositoryAdapter,
+  ) {}
 
   get lastSnapshotAt(): Date {
     return this.snapshotAt;

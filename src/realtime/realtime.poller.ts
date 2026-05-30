@@ -1,6 +1,9 @@
-import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
-import { IRealtimeSnapshotService, IPayloadDeduplicator, RealtimeSnapshot } from './interfaces/realtime.interfaces';
+import { Inject, Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import * as RealtimeInterfaces from './interfaces/realtime.interfaces';
 import { RealtimeGateway } from './realtime.gateway';
+
+export const REALTIME_SNAPSHOT_SERVICE = 'REALTIME_SNAPSHOT_SERVICE';
+export const PAYLOAD_DEDUPLICATOR = 'PAYLOAD_DEDUPLICATOR';
 
 @Injectable()
 export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
@@ -9,8 +12,10 @@ export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
   private isTickRunning = false;
 
   constructor(
-    private readonly snapshotService: IRealtimeSnapshotService,
-    private readonly deduplicator: IPayloadDeduplicator,
+    @Inject(REALTIME_SNAPSHOT_SERVICE)
+    private readonly snapshotService: RealtimeInterfaces.IRealtimeSnapshotService,
+    @Inject(PAYLOAD_DEDUPLICATOR)
+    private readonly deduplicator: RealtimeInterfaces.IPayloadDeduplicator,
     private readonly gateway: RealtimeGateway,
   ) {}
 
@@ -61,7 +66,7 @@ export class RealtimePollerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private broadcastSnapshot(snapshot: RealtimeSnapshot): void {
+  private broadcastSnapshot(snapshot: RealtimeInterfaces.RealtimeSnapshot): void {
     this.gateway.broadcast('readings/latest', snapshot.readings);
     this.gateway.broadcast('alerts/active', snapshot.alerts);
     this.gateway.broadcast('predictions/latest', snapshot.predictions);

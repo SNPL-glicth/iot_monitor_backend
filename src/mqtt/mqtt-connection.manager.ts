@@ -1,6 +1,6 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import * as mqtt from 'mqtt';
-import { MqttConfig } from './config/mqtt.config';
+import type { MqttConfig } from './config/mqtt.config';
 import { ExponentialBackoff } from './utils/exponential-backoff';
 import { IMqttConnectionManager } from './interfaces/mqtt.interfaces';
 

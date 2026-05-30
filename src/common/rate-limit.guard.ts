@@ -5,6 +5,7 @@ import {
   HttpException,
   HttpStatus,
   Logger,
+  SetMetadata,
 } from '@nestjs/common';
 import type { Request } from 'express';
 import { RateLimitStore } from './rate-limiting/rate-limit-store';
@@ -21,8 +22,8 @@ export class RateLimitGuard implements CanActivate {
   protected readonly logger = new Logger(RateLimitGuard.name);
   protected readonly store: RateLimitStore;
 
-  constructor(config: RateLimitConfig = DEFAULT_CONFIG) {
-    this.store = new RateLimitStore(config);
+  constructor() {
+    this.store = new RateLimitStore(DEFAULT_CONFIG);
   }
 
   canActivate(context: ExecutionContext): boolean {
@@ -45,4 +46,10 @@ export class RateLimitGuard implements CanActivate {
     this.store.record(clientKey);
     return true;
   }
+}
+
+export const BATCH_RATE_LIMIT_KEY = 'batch_rate_limit';
+
+export function BatchRateLimit() {
+  return SetMetadata(BATCH_RATE_LIMIT_KEY, true);
 }

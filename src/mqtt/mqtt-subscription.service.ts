@@ -1,10 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import { MqttService } from './mqtt.service';
 
 @Injectable()
-export class MqttSubscriptionService {
+export class MqttSubscriptionService implements OnModuleInit, OnModuleDestroy {
   constructor(private readonly mqtt: MqttService) {}
 
-  async onModuleInit() { return this.mqtt.onModuleInit(); }
-  async onModuleDestroy() { return this.mqtt.onModuleDestroy(); }
+  onModuleInit() {
+    this.mqtt.onModuleInit();
+  }
+
+  onModuleDestroy() {
+    this.mqtt.onModuleDestroy();
+  }
 }

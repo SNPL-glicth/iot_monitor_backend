@@ -41,6 +41,12 @@ import { AlertEventsModule } from './alerts/alert-events.module';
 import { AlertEvent } from './entities/alert-event.entity';
 import { MqttModule } from './mqtt/mqtt.module';
 import { BigIntSubscriber } from './common/subscribers/bigint.subscriber';
+import {
+  SensorReadingSubscriber,
+  AlertSubscriber,
+  PredictionSubscriber,
+  AlertEventSubscriber,
+} from './realtime/subscribers';
 import { EventsModule } from './events/events.module';
 import { OnboardingModule } from './onboarding/onboarding.module';
 
@@ -60,7 +66,13 @@ import { OnboardingModule } from './onboarding/onboarding.module';
       extra: {
         trustServerCertificate: true,
       },
-      subscribers: [BigIntSubscriber],
+      subscribers: [
+        BigIntSubscriber,
+        SensorReadingSubscriber,
+        AlertSubscriber,
+        PredictionSubscriber,
+        AlertEventSubscriber,
+      ],
       entities: [
         Device,
         Sensor,

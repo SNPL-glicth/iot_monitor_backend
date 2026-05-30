@@ -1,3 +1,4 @@
+import { Injectable } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { IPayloadDeduplicator } from '../interfaces/realtime.interfaces';
 
@@ -5,10 +6,10 @@ function canonicalJson(value: unknown): string {
   return JSON.stringify(value, Object.keys(value as object).sort());
 }
 
+@Injectable()
 export class PayloadDeduplicator implements IPayloadDeduplicator {
   private seen: Map<string, number> = new Map();
-
-  constructor(private readonly windowMs: number = 5000) {}
+  private readonly windowMs = 5000;
 
   isDuplicate(payload: unknown): boolean {
     const hash = createHash('sha256')

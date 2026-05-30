@@ -16,16 +16,21 @@ const LOGIN_CONFIG = {
   maxRequests: 5,
 };
 
+const sharedIpStore = new RateLimitStore(LOGIN_CONFIG);
+const sharedUserStore = new RateLimitStore({
+  windowMs: 60 * 60 * 1000,
+  maxRequests: 10,
+});
+
+export function clearLoginAttempts(ip: string, username: string): void {
+  sharedIpStore.reset(ip);
+  sharedUserStore.reset(`user:${username.toLowerCase()}`);
+}
+
 @Injectable()
 export class LoginRateLimitGuard extends RateLimitGuard implements CanActivate {
-  private readonly userStore: RateLimitStore;
-
   constructor() {
-    super(LOGIN_CONFIG);
-    this.userStore = new RateLimitStore({
-      windowMs: 60 * 60 * 1000,
-      maxRequests: 10,
-    });
+    super();
   }
 
   canActivate(context: ExecutionContext): boolean {
@@ -55,17 +60,17 @@ export class LoginRateLimitGuard extends RateLimitGuard implements CanActivate {
   }
 
   private checkIp(ip: string): boolean {
-    const decision = this.store.isAllowed(ip);
+    const decision = sharedIpStore.isAllowed(ip);
     if (!decision.allowed) return false;
-    this.store.record(ip);
+    sharedIpStore.record(ip);
     return true;
   }
 
   private checkUser(username: string): boolean {
     const key = `user:${username}`;
-    const decision = this.userStore.isAllowed(key);
+    const decision = sharedUserStore.isAllowed(key);
     if (!decision.allowed) return false;
-    this.userStore.record(key);
+    sharedUserStore.record(key);
     return true;
   }
 
